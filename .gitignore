@@ -26,3 +26,4 @@ static/
 .idea/
 .vscode/
 .DS_Store
+*.swp
