@@ -1,0 +1,5 @@
+-r base.txt
+pytest-django
+black
+flake8
+ipython

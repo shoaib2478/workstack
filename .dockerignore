@@ -1,0 +1,8 @@
+workstack-backend/
+__pycache__/
+*.py[cod]
+.git/
+.env
+*.sqlite3
+.DS_Store
+staticfiles/

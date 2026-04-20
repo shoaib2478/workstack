@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workstack"
+version = "0.1.0"
+description = "A modern HRIS platform API"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "Django>=5.0",
+    "djangorestframework>=3.14",
+    "psycopg2-binary>=2.9",
+    "celery>=5.3",
+    "redis>=5.0",
+    "django-environ>=0.11",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest-django",
+    "black",
+    "flake8",
+]
