@@ -22,6 +22,7 @@ INSTALLED_APPS = [
     # Local Apps
     'apps.users',
     'apps.organizations',
+    'apps.rbac',
 
     # Third Party Apps
 ]

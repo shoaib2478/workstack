@@ -51,3 +51,22 @@ class OrganizationMember(BaseTimeStampedModel):
     def __str__(self):
         status = "Active" if self.is_active else "Inactive"
         return f"[{status}] {self.user} at {self.organization.name}"
+
+class OrganizationSetting(BaseTimeStampedModel):
+    organization = models.OneToOneField(
+        Organization, 
+        on_delete=models.CASCADE, 
+        related_name='settings'
+    )
+    # Security Settings
+    sso_enforced = models.BooleanField(default=False, help_text="Require SAML/SSO login")
+    mfa_required = models.BooleanField(default=False, help_text="Require Multi-Factor Authentication for all members")
+    
+    # HRIS Specifics
+    fiscal_year_start_month = models.IntegerField(default=1, help_text="1 for Jan, 4 for Apr, etc.")
+    default_timezone = models.CharField(max_length=50, default='UTC')
+    
+    custom_ui_config = models.JSONField(default=dict, blank=True)
+
+    def __str__(self):
+        return f"Settings for {self.organization.name}"

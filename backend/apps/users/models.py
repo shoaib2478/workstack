@@ -1,6 +1,8 @@
 import uuid
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from core.models import BaseTimeStampedModel
+from django.conf import settings
 
 class User(AbstractUser):
     uuid = models.UUIDField(default=uuid.uuid4, editable=False)
@@ -25,4 +27,18 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.email or self.username
+
+class UserSetting(BaseTimeStampedModel):    
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, 
+        on_delete=models.CASCADE, 
+        related_name='settings'
+    )
+    theme = models.CharField(max_length=20, default='system', help_text="'light', 'dark', or 'system'")
+    language = models.CharField(max_length=10, default='en')
+    timezone = models.CharField(max_length=50, default='UTC')
+    receive_email_notifications = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"Settings for {self.user}"
 
