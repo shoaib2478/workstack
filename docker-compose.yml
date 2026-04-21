@@ -35,7 +35,7 @@ services:
       dockerfile: Dockerfile
     container_name: workstack_web
     #command: python manage.py runserver 0.0.0.0:8000
-    command: gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers 3
+    command: gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers 3 --reload
     volumes:
       - ./backend:/app
     ports:
