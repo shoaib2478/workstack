@@ -1,6 +1,9 @@
 from django.core.cache import cache
-from rbac.models import MemberRole
+from apps.rbac.models import MemberRole
 from apps.organizations.models import OrganizationMember
+import structlog
+logger = structlog.get_logger("workstack")
+# logger.info("employee_created", user_id=123, org_id=45)
 
 class RBACService:
     """
