@@ -3,3 +3,4 @@ pytest-django
 black
 flake8
 ipython
+# whitenoise
