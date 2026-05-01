@@ -32,3 +32,10 @@ class UserSerializer(serializers.ModelSerializer):
             'date_joined'
         ]
 
+
+class SignupSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=8)
+    first_name = serializers.CharField(max_length=150)
+    last_name = serializers.CharField(max_length=150)
+    company_name = serializers.CharField(max_length=255)
