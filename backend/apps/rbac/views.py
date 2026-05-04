@@ -9,6 +9,8 @@ class PermissionViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Global list of all available permissions in the system.
     Read-only for everyone.
+    Permissions must be 100% Global and Immutable
+    Permissions (Global Lego Blocks) - Every company uses the exact same Lego blocks
     """
     queryset = Permission.objects.all()
     serializer_class = PermissionSerializer
@@ -16,6 +18,10 @@ class PermissionViewSet(viewsets.ReadOnlyModelViewSet):
     # No pagination needed usually, but good to have if list gets massive
 
 class RoleViewSet(viewsets.ModelViewSet):
+    f"""
+    Roles (Custom Lego Castles):
+    Created by the users. A user can create a "Payroll Auditor" role and attach the global permission payroll:read block to it.
+    """
     
     serializer_class = RoleSerializer
     

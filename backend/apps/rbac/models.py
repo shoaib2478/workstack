@@ -17,6 +17,8 @@ class Role(BaseTimeStampedModel):
     name = models.CharField(max_length=100, help_text = "Acme Corp can have a custom SuperManager role")
     description = models.TextField(blank=True)
     last_modified_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name="modified_roles")
+    is_system = models.BooleanField(default=False, help_text="Cannot be deleted or modified by users.")
+    is_default = models.BooleanField(default=False, help_text="Automatically assigned to new invites.")
 
     class Meta:
         # Prevent duplicate role names within the same company
