@@ -22,4 +22,5 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     # API v1 Routing
     path('api/v1/', include('apps.users.urls')),
+    path('api/v1/rbac/', include('apps.rbac.urls')),
 ]

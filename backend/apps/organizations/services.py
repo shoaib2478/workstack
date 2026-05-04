@@ -6,9 +6,13 @@ from apps.rbac.models import Role, MemberRole
 from apps.rbac.services import RBACService
 import structlog
 from rest_framework.exceptions import ValidationError
+from apps.users.models import User, UserSetting
+from django.utils.text import slugify
+import uuid
+
 
 logger = structlog.get_logger("workstack")
-User = get_user_model()
+# User = get_user_model()
 
 
 class MembershipService:
@@ -74,16 +78,22 @@ class TenantRegistrationService:
             first_name=first_name,
             last_name=last_name
          )
+        user_setting = UserSetting.objects.get_or_create(user=user)
+
+
+        # Use the domain prefix if available, otherwise slugify the company name
+        base_slug = email.split('@')[1].split('.')[0] if '@' in email else slugify(company_name)
+        # Append a random 6-character string to guarantee uniqueness
+        slug = f"{base_slug}-{str(uuid.uuid4())[:6]}"
         domain = email.split('@')[1] if '@' in email else ''
         if Organization.objects.filter(domain=domain).exists():
             raise ValidationError({"company": "Your company is already registered. Please ask your administrator for an invite."})
-        # 2. Create the Organization (Generate a simple slug from the name)
-        slug = company_name.lower().replace(" ", "-").replace(".", "")
+        
         # Handle potential slug collisions in a real app (e.g., append random string if exists)
         org = Organization.objects.create(
             name=company_name,
             slug=slug,
-            domain=email.split('@')[1] if '@' in email else ''
+            domain=domain
         )
                 # 5. Create the Membership joining the User to the Org
         membership = OrganizationMember.objects.create(
@@ -96,7 +106,7 @@ class TenantRegistrationService:
 
         # 4. Create the Default "Super Admin" Role for this specific Org
         # (Later, we will map actual global permissions to this role)
-        RBACService.provision_default_roles_for_org(org.id, membership)
+        RBACService.provision_default_roles_for_org(user, org, membership)
         
         
 

@@ -1,6 +1,7 @@
 from rest_framework import permissions
 from apps.rbac.services import RBACService
 import structlog
+import uuid
 
 logger = structlog.get_logger(__name__)
 
@@ -18,7 +19,7 @@ class HasOrganizationPermission(permissions.BasePermission):
 
     def has_permission(self, request, view):
         
-        log = logger.bind(endpoint=request.path)
+        log = logger.bind(event_type='has_permission')
             
         user_id = request.user.id
         log.bind(user_id=user_id)
@@ -28,10 +29,23 @@ class HasOrganizationPermission(permissions.BasePermission):
             return False
 
         try:
-            organization_id = int(org_id_header)
-        except ValueError:
+            # validate uuid
+            organization_uuid = uuid.UUID(org_id_header)
+            from apps.organizations.models import Organization
+            organization = Organization.objects.get(uuid=organization_uuid)
+            organization_id = organization.id
+        except ValueError as excp:
+            log.error("has_permission_failed", status="rbac_ValueError", excp=excp)
+            return False
+        except TypeError as excp:
+            log.error("has_permission_failed", status="rbac_TypeError", excp=excp)
+            return False
+        except Exception as excp:
+            log.error("has_permission_failed", status="rbac_Exception", excp=excp)
             return False
         log.bind(organization_id=organization_id)
+
+
         has_access = RBACService.has_permission(
             user_id=user_id, 
             organization_id=organization_id, 
