@@ -1,6 +1,7 @@
 from django.core.cache import cache
-from apps.rbac.models import MemberRole
+from apps.rbac.models import MemberRole, Role
 from apps.organizations.models import OrganizationMember
+from apps.rbac.constants import DEFAULT_ROLES
 import structlog
 logger = structlog.get_logger("workstack")
 # logger.info("employee_created", user_id=123, org_id=45)
@@ -66,3 +67,23 @@ class RBACService:
         ensuring the cache is instantly purged and security is maintained.
         """
         cache.delete(cls._get_cache_key(user_id, organization_id))
+
+    @classmethod
+
+    @classmethod
+    def provision_default_roles_for_org(cls, organization_id, membership):
+        """[SRP] Handles seeding default roles and permissions for a new tenant."""
+        for role_name, role_description in DEFAULT_ROLES.items():
+            role = Role.objects.create(
+                organization_id=organization_id,
+                name=role_name,
+                description=role_description
+            )
+            MemberRole.objects.create(member=membership, role=role)
+
+
+
+        # 3. TODO: Handle Permissions. 
+        # TODO: In a real app, you might query all existing Permissions and attach them:
+        # TODO: all_perms = Permission.objects.all()
+        # TODO: admin_role.permissions.set(all_perms)

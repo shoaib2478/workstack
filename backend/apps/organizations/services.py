@@ -3,7 +3,9 @@ from .models import OrganizationMember, Organization, OrganizationSetting
 from django.db import transaction
 from django.contrib.auth import get_user_model
 from apps.rbac.models import Role, MemberRole
+from apps.rbac.services import RBACService
 import structlog
+from rest_framework.exceptions import ValidationError
 
 logger = structlog.get_logger("workstack")
 User = get_user_model()
@@ -62,7 +64,9 @@ class TenantRegistrationService:
 
     @classmethod
     @transaction.atomic
-    def provision_new_tenant(cls, email: str, password: str, first_name: str, last_name: str, company_name: str) -> User:
+    def provision_new_tenant(cls, email: str, password: str, first_name: str, last_name: str, company_name: str) -> User:                
+        if User.objects.filter(email=email).exists():
+            raise ValidationError({"email": "A user with this email already exists."})
         user = User.objects.create_user(
             username=email, 
             email=email,
@@ -70,7 +74,9 @@ class TenantRegistrationService:
             first_name=first_name,
             last_name=last_name
          )
-    
+        domain = email.split('@')[1] if '@' in email else ''
+        if Organization.objects.filter(domain=domain).exists():
+            raise ValidationError({"company": "Your company is already registered. Please ask your administrator for an invite."})
         # 2. Create the Organization (Generate a simple slug from the name)
         slug = company_name.lower().replace(" ", "-").replace(".", "")
         # Handle potential slug collisions in a real app (e.g., append random string if exists)
@@ -79,37 +85,20 @@ class TenantRegistrationService:
             slug=slug,
             domain=email.split('@')[1] if '@' in email else ''
         )
-
-        # 3. Create Default Organization Settings
-        OrganizationSetting.objects.create(organization=org)
-
-        # 4. Create the Default "Super Admin" Role for this specific Org
-        # (Later, we will map actual global permissions to this role)
-        admin_role = Role.objects.create(
-            organization=org,
-            name="Super Admin",
-            description="Full unrestricted access to all platform features."
-        )
-        
-        # We also seed a default "Employee" role for them to use later
-        Role.objects.create(
-            organization=org,
-            name="Standard Employee",
-            description="Basic access to personal profile and company directory."
-        )
-
-        # 5. Create the Membership joining the User to the Org
+                # 5. Create the Membership joining the User to the Org
         membership = OrganizationMember.objects.create(
             user=user,
             organization=org,
             is_active=True
         )
+        # 3. Create Default Organization Settings
+        OrganizationSetting.objects.create(organization=org)
 
-        # 6. Assign the Super Admin Role to this Membership
-        MemberRole.objects.create(
-            member=membership,
-            role=admin_role
-        )
+        # 4. Create the Default "Super Admin" Role for this specific Org
+        # (Later, we will map actual global permissions to this role)
+        RBACService.provision_default_roles_for_org(org.id, membership)
+        
+        
 
         logger.info(
             "tenant_provisioned", 
