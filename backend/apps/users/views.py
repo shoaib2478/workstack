@@ -9,6 +9,14 @@ from core.permissions import HasOrganizationPermission
 from django.conf import settings
 import structlog  
 from core.utils.auth import set_jwt_cookies
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework.permissions import AllowAny
+from rest_framework_simplejwt.tokens import RefreshToken
+from apps.organizations.services import TenantRegistrationService
+from .serializers import SignupSerializer
+
 
 logger = structlog.get_logger("workstack")
 
@@ -54,19 +62,17 @@ class LogoutView(APIView):
         return response
 
 class UserViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = User.objects.filter(is_active=True)
+    
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
-    permission_classes = [IsAuthenticated, HasOrganizationPermission('payroll:write')]
+    # permission_classes = [IsAuthenticated, HasOrganizationPermission('payroll:write')]
     lookup_field = 'uuid'
 
-from rest_framework import status
-from rest_framework.response import Response
-from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny
-from rest_framework_simplejwt.tokens import RefreshToken
-from apps.organizations.services import TenantRegistrationService
-from .serializers import SignupSerializer
+    def get_queryset(self):
+        user = self.request.user
+        user_org_ids = user.memberships.values_list('organization_id', flat=True)
+        return User.objects.filter(is_active=True, memberships__organization_id__in=user_org_ids).distinct()
+
 
 class SignupView(APIView):
     """
