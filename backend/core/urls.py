@@ -23,4 +23,5 @@ urlpatterns = [
     # API v1 Routing
     path('api/v1/', include('apps.users.urls')),
     path('api/v1/rbac/', include('apps.rbac.urls')),
+    path('api/v1/organizations/', include('apps.organizations.urls'))
 ]

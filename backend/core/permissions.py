@@ -54,6 +54,7 @@ class HasOrganizationPermission(permissions.BasePermission):
 
         if not has_access:
             log.warning(
+                "access_denied",
                 status="rbac_denied",                
                 attempted_action=self.required_permission_code
             )

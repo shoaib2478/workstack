@@ -77,12 +77,16 @@ class RBACService:
         return permission
     
     @classmethod
-    def add_role(cls, organization, name: str, description: str = None) -> Role:
+    def add_role(cls, organization, name: str, description: str = None, is_system: bool = False, is_default: bool = False) -> Role:
         """Creates a Role specific to an Organization."""
         role, created = Role.objects.get_or_create(
             organization=organization,
             name=name,
-            defaults={'description': description}
+            defaults={
+                'description': description,
+                'is_system': is_system,
+                'is_default': is_default
+                }
         )
         logger.info("Role added", role=role, created=created)
         return role
@@ -142,8 +146,8 @@ class RBACService:
         admin_role_desc = DEFAULT_ROLES.get(admin_role_name)
         std_role_name = "Standard Employee"
         std_role_desc = DEFAULT_ROLES.get(std_role_name)
-        admin_role = cls.add_role(organization, admin_role_name, admin_role_desc)
-        employee_role = cls.add_role(organization, std_role_name, std_role_desc)
+        admin_role = cls.add_role(organization, admin_role_name, admin_role_desc, is_system=True, is_default=False)
+        employee_role = cls.add_role(organization, std_role_name, std_role_desc, is_system=True, is_default=True) # <-- This makes it the fallback role!
 
         
         for perm_code, perm_obj in system_permissions.items():
