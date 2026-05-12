@@ -4,7 +4,7 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.shortcuts import get_object_or_404
 from apps.organizations.models import Organization, OrganizationMember
-from apps.organizations.services import InviteUserService
+from apps.organizations.service.invites import InviteUserService
 from .serializers import InviteUserSerializer, AcceptInviteSerializer
 from core.permissions import HasOrganizationPermission
 import structlog

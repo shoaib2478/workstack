@@ -26,6 +26,8 @@ INSTALLED_APPS = [
     'apps.users',
     'apps.organizations',
     'apps.rbac',
+    'treebeard',
+    'apps.hris',
 
     # Third Party Apps
 ]

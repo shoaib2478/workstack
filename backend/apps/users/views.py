@@ -14,7 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
-from apps.organizations.services import TenantRegistrationService
+from apps.organizations.service.onboarding import TenantRegistrationService
 from .serializers import SignupSerializer
 
 
