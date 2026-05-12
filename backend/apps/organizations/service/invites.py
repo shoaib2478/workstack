@@ -20,14 +20,14 @@ class InviteUserService:
 
     @classmethod
     @transaction.atomic
-    def invite_user(cls, caller: User, organization: Organization, email: str, role_uuid: str = None):
+    def invite_user(cls, caller: User, organization: Organization, email: str, role_uuid: str = None, manager_uuid: str = None):
         
-        log = logger.bind(event_type="invite_user")
+        log = logger.bind(event_type="invite_user", caller=caller, role_uuid=role_uuid, manager_uuid=manager_uuid)
         user, user_created = User.objects.get_or_create(
             email=email,
             defaults={'username': email}
         )
-        log.bind(user=user, user_created=user_created)
+        log = log.bind(user=user, user_created=user_created)
         if user_created:
             # Prevent them from logging in with a password until they accept the invite
             user.set_unusable_password()
@@ -60,7 +60,9 @@ class InviteUserService:
         invite_payload = {
             "user_id" : str(user.uuid),
             "organization_id" : str(organization.uuid),
-            "membership_id" : str(membership.uuid)
+            "membership_id" : str(membership.uuid),
+            "inviter_id" : str(caller.uuid),
+            "manager_id" : str(manager_uuid)
         }
         
         accept_invite_token = signer.sign_object(invite_payload)

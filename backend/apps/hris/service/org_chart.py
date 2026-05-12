@@ -1,5 +1,5 @@
 from django.db import transaction
-from apps.organizations.models import Employee, Organization
+from apps.organizations.models import Organization
 from django.contrib.auth import get_user_model
 from apps.hris.models import Employee
 
@@ -36,7 +36,7 @@ class OrgChartService:
             # Has a manager? Append as a child.
             # Treebeard reads the manager's path ('0001') and generates the child path ('00010001')
             employee = manager_node.add_child(**employee_data)
-
+            print("New employee added -------------------- " , employee)
         return employee
 
     @classmethod

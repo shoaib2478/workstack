@@ -1,5 +1,6 @@
 from django.core.cache import cache
 from apps.organizations.models import OrganizationMember, Organization, OrganizationSetting
+from apps.hris.service.org_chart import OrgChartService
 from django.db import transaction
 from django.contrib.auth import get_user_model
 from apps.rbac.models import Role, MemberRole
@@ -62,6 +63,13 @@ class TenantRegistrationService:
         # (Later, we will map actual global permissions to this role)
         RBACService.provision_default_roles_for_org(user, org, membership)
         
+        # Create the Root Node (CEO) in the Org Chart
+        OrgChartService.add_employee(
+            organization=org,
+            user=user,
+            job_title="Founder / CEO",
+            manager_node=None  # Passing None makes them the Root Node!
+        )
         
 
         logger.info(

@@ -12,6 +12,8 @@ import uuid
 from apps.organizations.mixin import OrganizationMixin
 from django.core.signing import TimestampSigner, SignatureExpired, BadSignature
 from core.utils.auth import set_jwt_cookies
+from apps.hris.models import Employee
+from apps.hris.service.org_chart import OrgChartService
 
 
 logger = structlog.get_logger("workstack")
@@ -37,7 +39,8 @@ class InviteUserView(APIView, OrganizationMixin):
                     caller=request.user,
                     organization=organization,
                     email=serializer.validated_data['email'],
-                    role_uuid=serializer.validated_data.get('role_uuid')
+                    role_uuid=serializer.validated_data.get('role_uuid'),
+                    manager_uuid=serializer.validated_data.get('manager_uuid')
                 )
                 return Response(
                     {
@@ -78,6 +81,8 @@ class AcceptInviteView(APIView):
             user_uuid = payload.get('user_id')
             org_uuid = payload.get('organization_id')
             membership_uuid = payload.get('membership_id')
+            inviter_uuid = payload.get('inviter_id')
+            manager_uuid = payload.get('manager_id')
             log = log.bind(user_uuid=user_uuid, org_uuid=org_uuid, membership_uuid=membership_uuid)
             membership = OrganizationMember.objects.select_related('user', 'organization').get(uuid=membership_uuid)
             if membership.is_active:
@@ -89,6 +94,30 @@ class AcceptInviteView(APIView):
 
             membership.is_active = True
             membership.save()
+
+            # ==========================================
+            # [NEW]: THE ORG CHART INTEGRATION
+            # ==========================================
+            # 1. Find the Employee profile of the person who invited them
+            print("inviter_uuid ----------------------------------------", inviter_uuid)
+            if not manager_uuid:
+                inviter_employee = Employee.objects.get(
+                    user__uuid=inviter_uuid,
+                    organization=membership.organization
+                )
+            else:
+                inviter_employee = Employee.objects.get(
+                    user__uuid=manager_uuid,
+                    organization=membership.organization
+                )
+            print("inviter_uuid ----------------------------------------", inviter_uuid)
+            # 2. Add the new user to the tree UNDER the inviter
+            OrgChartService.add_employee(
+                organization=membership.organization,
+                user=user,
+                job_title="New Hire", # HR can change this later
+                manager_node=inviter_employee
+            )
 
             log.info("invite_accepted", user_id=user.id, org_id=membership.organization_id)
 
