@@ -3,6 +3,7 @@ DOCKER_COMPOSE = docker compose
 EXEC_BACKEND = $(DOCKER_COMPOSE) exec web
 DB_CONTAINER = db
 
+
 .PHONY: help build up down restart logs shell dbshell migrate makemigrations test
 
 help: ## Show this help message
@@ -28,6 +29,9 @@ dev: ## Start Django backend specifically (with logs attached)
 
 shell: ## Open a Django Python shell inside the container
 	$(EXEC_BACKEND) python manage.py shell
+
+backendshell: 
+	$(EXEC_BACKEND) /bin/bash
 
 dbshell: ## Open a PostgreSQL shell inside the DB container
 	$(DOCKER_COMPOSE) exec $(DB_CONTAINER) psql -U workstackuser -d workstack
