@@ -8,6 +8,7 @@ from apps.organizations.mixin import OrganizationMixin
 from rest_framework import viewsets
 from django.shortcuts import get_object_or_404
 import structlog
+from .pagination import EmployeeCursorPagination
 
 
 logger = structlog.get_logger('workstack')
@@ -15,7 +16,7 @@ logger = structlog.get_logger('workstack')
 class EmployeeViewSet(OrganizationMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = EmployeeSerializer
-
+    pagination_class = EmployeeCursorPagination
     lookup_field = 'user__uuid'
     lookup_url_kwarg = 'uuid'
 
