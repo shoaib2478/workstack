@@ -9,12 +9,16 @@ from rest_framework import viewsets
 from django.shortcuts import get_object_or_404
 import structlog
 from .pagination import EmployeeCursorPagination
+from apps.hris.permissions import IsManagerOfEmployee
 
 
 logger = structlog.get_logger('workstack')
 
-class EmployeeViewSet(OrganizationMixin, viewsets.ReadOnlyModelViewSet):
-    permission_classes = [IsAuthenticated]
+class EmployeeViewSet(OrganizationMixin, viewsets.ModelViewSet):
+    """
+    Handles all Org Chart and Employee retrieval operations.
+    """
+    permission_classes = [IsAuthenticated, IsManagerOfEmployee]
     serializer_class = EmployeeSerializer
     pagination_class = EmployeeCursorPagination
     lookup_field = 'user__uuid'
@@ -22,7 +26,24 @@ class EmployeeViewSet(OrganizationMixin, viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return Employee.objects.select_related('user', 'department').filter(organization=self.organization).order_by('path')
+    
+    def update(self, request, *args, **kwargs):
+        """
+        PATCH /api/v1/hris/employees/{uuid}/
+        Only accessible if the IsManagerOfEmployee permission returns True!
+        """
+        partial = kwargs.pop('partial', True) # Force partial updates
+        instance = self.get_object() # <--- THIS is what triggers has_object_permission!
 
+        # For this test, let's only allow them to update the job_title
+        allowed_fields = ['job_title']
+        update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
+
+        serializer = self.get_serializer(instance, data=update_data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+
+        return Response(serializer.data)
     # not needed now moved to EmployeeSerializer
     # def _format_employee(self, emp):        
     #     return {
