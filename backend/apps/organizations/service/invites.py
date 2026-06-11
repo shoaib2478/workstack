@@ -5,7 +5,7 @@ from apps.rbac.services import RBACService
 from django.contrib.auth import get_user_model
 from apps.rbac.models import Role, MemberRole
 import structlog
-
+from apps.organizations.tasks import send_magic_link_email
 from apps.users.models import User, UserSetting
 
 import uuid
@@ -74,5 +74,9 @@ class InviteUserService:
         )
         
         # send_invite_email.delay(email, accept_invite_token)
-
+        # send_magic_link_email.delay(email, accept_invite_token)
+        send_magic_link_email.apply_async(
+            args=[email, accept_invite_token], 
+            countdown=15 # Wait exactly 15 seconds before processing
+        )
         return membership, accept_invite_token
