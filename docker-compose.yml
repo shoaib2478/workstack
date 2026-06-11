@@ -26,7 +26,7 @@ services:
     env_file:
       - .env
     ports:
-      - "5672:5672"   # AMQP protocol port
+      - "5672:5672"   # AMQP protocol port The message broker port
       - "15672:15672" # Management UI port (http://localhost:15672)
 
   web:
