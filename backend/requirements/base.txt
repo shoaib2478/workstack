@@ -11,3 +11,6 @@ django-structlog>=8.0.0
 djangorestframework-simplejwt>=5.3.1
 django-cors-headers>=4.3.1
 django-treebeard>=5.0.5
+google-genai>=2.8.0
+google-auth>=2.55.0
+mcp>=1.27.2
