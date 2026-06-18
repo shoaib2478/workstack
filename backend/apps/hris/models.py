@@ -87,6 +87,9 @@ class Employee(MP_Node):
         constraints = [
             models.UniqueConstraint(fields=['organization', 'user'], name='unique_org_employee')
         ]
-
+    @property
+    def manager(self):
+        return self.get_parent()
+        
     def __str__(self):
         return f"{self.user.get_full_name()} ({self.job_title})"

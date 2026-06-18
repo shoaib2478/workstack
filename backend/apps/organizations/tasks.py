@@ -8,6 +8,11 @@ from google.genai import types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from django.conf import settings
+
+# Import the SSE client instead of the Stdio client
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+
 logger = structlog.get_logger("workstack")
 
 @shared_task
@@ -96,7 +101,7 @@ async def run_mcp_agent_loop(target_email: str):
             
             # Turn 1: Send prompt + tools + the enforcer
             response = ai_client.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-2.5-flash",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     tools=[GET_MANAGER_TOOL],
@@ -205,3 +210,49 @@ async def run_mcp_agent_loop(target_email: str):
 def run_ai_org_lookup(target_email):
     """Celery entrypoint mapping the async engine to the synchronous worker pool"""
     return asyncio.run(run_mcp_agent_loop(target_email))
+
+
+
+# Run the SSE client
+async def run_mcp_agent_loop_sse(target_email: str):
+    ai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+    
+    # Connect via HTTP to your running MCP Daemon
+    # If testing via Docker, change localhost to the container name (e.g., http://mcp_hr:8080/sse)
+    url = "http://localhost:8080/sse" 
+    
+    async with sse_client(url) as (read, write):
+        async with ClientSession(read, write) as mcp_session:
+            await mcp_session.initialize()
+            
+            prompt = f"Can you find out who I need to contact to approve expenses for {target_email}?"
+            
+            # Step 1: Ask Gemini
+            response = ai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(tools=[GET_MANAGER_TOOL])
+            )
+            
+            if response.function_calls:
+                tool_call = response.function_calls[0]
+                
+                # Step 2: This now makes a lightning-fast HTTP request to your daemon
+                mcp_result = await mcp_session.call_tool(tool_call.name, tool_call.args)
+                tool_output_text = mcp_result.content[0].text
+                
+                # Step 3: Loop back to Gemini
+                final_response = ai_client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[
+                        types.Content(role="user", parts=[types.Part.from_text(text=prompt)]),
+                        types.Content(role="model", parts=[types.Part.from_function_call(name=tool_call.name, args=tool_call.args)]),
+                        types.Content(role="user", parts=[types.Part.from_function_response(name=tool_call.name, response={"result": tool_output_text})])
+                    ]
+                )
+                return final_response.text
+            return response.text
+
+@shared_task(name="apps.organizations.tasks.run_ai_org_lookup_sse")
+def run_ai_org_lookup_sse(target_email):
+    return asyncio.run(run_mcp_agent_loop_sse(target_email))

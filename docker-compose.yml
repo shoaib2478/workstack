@@ -73,6 +73,17 @@ services:
         - static_volume:/usr/share/nginx/html/static  # <-- Nginx reads from the exact same volume
       depends_on:
         - web
+  mcp_hr_daemon:
+    build:
+      context: ./backend
+    container_name: workstack_mcp_hr
+    command: python mcp_daemons/hr_server.py
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
 volumes:
   postgres_data:
   static_volume: # Define the shared volume
