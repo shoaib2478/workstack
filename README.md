@@ -322,7 +322,7 @@ The Celery task `run_ai_org_lookup` orchestrates: Gemini tool call → MCP serve
 | Document | Description |
 |----------|-------------|
 | [docs/MCP_DEEP_DIVE.md](docs/MCP_DEEP_DIVE.md) | MCP concepts, transports (stdio vs SSE), FAQ, and protocol flow |
-| [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) | Workstack-specific integration: Django boot, Celery loop, file layout, Docker |
+| [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) | Workstack integration: Host→Client→Server flow, `ToolConfig`, Gemini schema errors, Docker |
 
 ---
 
