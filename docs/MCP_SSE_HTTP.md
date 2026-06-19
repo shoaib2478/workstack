@@ -39,13 +39,14 @@ When Celery uses stdio, each task forks `mcp_org_server.py`, calls `django.setup
 
 ```mermaid
 flowchart TB
-    subgraph Host["Host (Celery worker)"]
+    subgraph CeleryWorker["Host — Celery worker"]
+        CeleryTask[run_mcp_agent_loop]
         Gemini[Gemini API]
         Client[MCP ClientSession]
-        Gemini <-->|HTTPS| Host
+        CeleryTask <-->|HTTPS| Gemini
     end
 
-    subgraph Daemon["MCP SSE Daemon (workstack_mcp_hr :8080)"]
+    subgraph Daemon["MCP SSE Daemon — workstack_mcp_hr :8080"]
         FastMCP[FastMCP + Uvicorn/Starlette]
         Tool[get_employee_manager]
         FastMCP --> Tool
