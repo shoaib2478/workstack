@@ -34,8 +34,12 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: workstack_web
-    #command: python manage.py runserver 0.0.0.0:8000
+    # ── Current: sync WSGI (development default) ──
     command: gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers 3 --reload
+    # ── Future: WSGI + Gevent for legacy DRF at scale (see docs/WSGI_GEVENT_VS_ASGI.md) ──
+    # command: gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers 3 --worker-class gevent --worker-connections 1000 --reload
+    # ── Future: ASGI + Uvicorn for native async endpoints (see docs/WSGI_GEVENT_VS_ASGI.md) ──
+    # command: gunicorn core.asgi:application --bind 0.0.0.0:8000 --workers 3 -k uvicorn.workers.UvicornWorker --reload
     volumes:
       - ./backend:/app
       - static_volume:/app/staticfiles  # <-- Map the static folder to a shared volume
@@ -53,7 +57,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: workstack_celery
+    # ── Current: prefork pool (one blocking task per worker process) ──
     command: celery -A core worker -l info
+    # ── Future: gevent pool for I/O-bound LLM/MCP tasks (see docs/CELERY_GEVENT.md) ──
+    # command: celery -A core worker -l info --pool=gevent --concurrency=500
     volumes:
       - ./backend:/app
     env_file:
@@ -82,6 +89,8 @@ services:
       - ./backend:/app
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     depends_on:
       - db
 volumes:
