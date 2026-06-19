@@ -63,13 +63,13 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Uvicorn as Uvicorn Event Loop<br/>(1 OS thread)
-    participant View as async def view
-    participant DB as asyncpg / async ORM
+    participant Uvicorn as Uvicorn event loop
+    participant View as Async Django view
+    participant DB as asyncpg or async ORM
 
     Client->>Uvicorn: HTTP request
-    Uvicorn->>View: await handler (coroutine)
-    View->>DB: await query (non-blocking epoll)
+    Uvicorn->>View: await handler
+    View->>DB: await query
     Note over Uvicorn: Other coroutines run while waiting
     DB-->>View: rows
     View-->>Uvicorn: JSON
@@ -182,15 +182,15 @@ For **I/O-bound concurrent HTTP**, yes — similar throughput goals:
 ```mermaid
 flowchart TD
     Req[HTTP Request] --> UV[Uvicorn Event Loop]
-    UV --> DRF[DRF def post(...)]
+    UV --> DRF["DRF sync view — def post"]
     DRF --> Wrap{Django detects sync view}
-    Wrap --> TP[ThreadPoolExecutor<br/>~40 threads default]
+    Wrap --> TP["ThreadPoolExecutor — ~40 threads"]
     TP --> ORM[Blocking ORM + psycopg recv]
     ORM --> TP
     TP --> UV
     UV --> Resp[Response]
 
-    Req2[Request 41+] --> Wait[Queued waiting for free thread]
+    Req2["Request 41+"] --> Wait[Queued waiting for free thread]
 ```
 
 You run:
@@ -343,9 +343,9 @@ Celery gevent (separate doc):
 
 ```mermaid
 flowchart LR
-    subgraph New["New project / new endpoints"]
+    subgraph New["New project or new endpoints"]
         N1[ASGI + Uvicorn]
-        N2[async def + Django Ninja]
+        N2["async views + Django Ninja"]
         N3[psycopg3 async or asyncpg]
         N1 --> N2 --> N3
     end

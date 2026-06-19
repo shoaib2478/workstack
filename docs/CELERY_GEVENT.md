@@ -36,7 +36,7 @@ celery:
 | Gemini call (10s) | That worker is frozen for 10 seconds |
 | 9th simultaneous task | Waits in RabbitMQ queue |
 
-**Your intuition is correct:** with prefork, one task owns one worker until done. My earlier "10,000 simultaneous connections" claim applies only when you switch pools **and** write tasks to cooperate with cooperative multitasking.
+With the default **prefork** pool, each worker process handles **one task at a time** until that task completes. High concurrency requires switching to a cooperative pool (for example **gevent**) **and** writing tasks that yield during I/O waits rather than blocking the worker for the full duration of external API calls.
 
 ### Gevent pool: cooperative greenlets
 
