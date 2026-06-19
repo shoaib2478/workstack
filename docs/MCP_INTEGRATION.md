@@ -604,6 +604,8 @@ final_response >>> Contact Alice for expense approval ...
 
 ## 10. Step 4: SSE Daemon (Production-Style)
 
+> **Full SSE guide:** [MCP_SSE_HTTP.md](MCP_SSE_HTTP.md) — async boundary, Docker, isolated tests, troubleshooting.
+
 **File:** `backend/mcp_daemons/hr_server.py`
 
 ```python

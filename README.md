@@ -311,9 +311,9 @@ Two transport modes are implemented:
 | **stdio** | `apps/organizations/management/commands/mcp_org_server.py` | Local dev, Celery subprocess spawning (1–2s Django boot per call) |
 | **SSE/HTTP** | `backend/mcp_daemons/hr_server.py` | Persistent daemon, Docker service `mcp_hr_daemon` on port **8080** |
 
-The Celery task `run_ai_org_lookup` orchestrates: Gemini tool call → MCP server → DB query → Gemini final answer.
+The Celery tasks `run_ai_org_lookup` (stdio) and `run_ai_org_lookup_sse` (HTTP) orchestrate: Gemini → MCP → PostgreSQL → Gemini.
 
-> **Status:** MCP integration is under active testing. See the docs below for architecture decisions and production guidance.
+> **Status:** SSE daemon tested via `apps.organizations.tests.test_mcp_sse`. See [docs/MCP_SSE_HTTP.md](docs/MCP_SSE_HTTP.md).
 
 ---
 
@@ -322,7 +322,17 @@ The Celery task `run_ai_org_lookup` orchestrates: Gemini tool call → MCP serve
 | Document | Description |
 |----------|-------------|
 | [docs/MCP_DEEP_DIVE.md](docs/MCP_DEEP_DIVE.md) | MCP concepts, transports (stdio vs SSE), FAQ, and protocol flow |
-| [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) | Workstack integration: Host→Client→Server flow, `ToolConfig`, Gemini schema errors, Docker |
+| [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) | stdio integration: Host→Client→Server flow, `ToolConfig`, Gemini errors |
+| [docs/MCP_SSE_HTTP.md](docs/MCP_SSE_HTTP.md) | SSE/HTTP daemon: `hr_server.py`, `sync_to_async`, isolated testing |
+| [docs/CELERY_GEVENT.md](docs/CELERY_GEVENT.md) | Celery `--pool=gevent` for concurrent LLM/MCP I/O tasks |
+| [docs/WSGI_GEVENT_VS_ASGI.md](docs/WSGI_GEVENT_VS_ASGI.md) | WSGI+Gevent vs Uvicorn+ASGI vs DRF thread pool — scaling guide |
+
+### MCP SSE quick test
+
+```bash
+docker compose up mcp_hr_daemon -d
+docker compose exec web python manage.py test apps.organizations.tests.test_mcp_sse -v 2
+```
 
 ---
 
