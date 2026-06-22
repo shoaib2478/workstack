@@ -722,6 +722,7 @@ Treat `mcp_hr_daemon` like `celery`:
 | Auth on MCP | API key or mTLS between Celery and MCP daemon |
 | Additional tools | Payroll, PTO balance, department listing |
 | Shared tool module | DRY tool implementations imported by both stdio and SSE entrypoints |
+| LangGraph agent docs | See [AGENT_ARCHITECTURE.md](AGENT_ARCHITECTURE.md) and [INCIDENT_TRIAGE_AGENT.md](INCIDENT_TRIAGE_AGENT.md) |
 
 ---
 

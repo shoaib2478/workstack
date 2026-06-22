@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     'apps.rbac',
     'treebeard',
     'apps.hris',
+    'apps.incidents',
 
     # Third Party Apps
 ]
