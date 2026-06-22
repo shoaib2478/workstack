@@ -12,7 +12,7 @@ End-to-end guide for the Phase 5 agent: Celery chord → LangGraph → MCP HR lo
 
 1. [What this agent does](#1-what-this-agent-does)
 2. [Prerequisites](#2-prerequisites)
-3. [Architecture walkthrough](#3-architecture-walkthrough)
+3. [Architecture walkthrough — group + chord](#3-architecture-walkthrough)
 4. [Line-by-line code map](#4-line-by-line-code-map)
 5. [Version A vs Version B](#5-version-a-vs-version-b)
 6. [How to test](#6-how-to-test)
@@ -53,15 +53,25 @@ DATABASE_URL=...
 CELERY_BROKER_URL=...
 ```
 
-### Python packages
+### Install LangChain stack (pinned in requirements)
 
-Install LangChain stack (see [LANGCHAIN_MCP_INTEGRATION.md](LANGCHAIN_MCP_INTEGRATION.md)):
+LangChain packages are in `backend/requirements/base.txt`:
 
-```bash
-docker compose exec web pip install langchain-core langchain-google-genai langgraph langchain-mcp-adapters
+```text
+langchain-core~=1.4.8
+langchain-google-genai~=4.2.5
+langchain-mcp-adapters~=0.3.0
+langgraph~=1.2.6
 ```
 
-Or add to `requirements/base.txt` and rebuild.
+Rebuild after changes:
+
+```bash
+docker compose build web celery
+docker compose up -d
+```
+
+See [LANGCHAIN_MCP_INTEGRATION.md](LANGCHAIN_MCP_INTEGRATION.md) §8 for why `~=` beats `>=`.
 
 ### HR data in database
 
@@ -73,6 +83,52 @@ The agent calls `get_employee_manager` for the commit author email. Ensure a use
 ---
 
 ## 3. Architecture walkthrough
+
+### Celery Canvas: `group` + `chord` (both are used)
+
+A common confusion: **`group` and `chord` work together** — the chord was not removed.
+
+```python
+# Section 3 in tasks.py — trigger_incident_workflow()
+
+# 1. SCATTER — group bundles parallel tasks
+parallel_fetchers = group(
+    fetch_datadog_metrics.s(server_id),
+    fetch_github_commits.s(server_id),
+    fetch_slack_alerts.s(server_id),
+)
+
+# 2. GATHER — chord waits for ALL group tasks, then runs callback
+workflow = chord(parallel_fetchers)(run_mcp_enhanced_triage.s(server_id))
+```
+
+| Piece | Role |
+|-------|------|
+| **`group(...)`** | Runs 3 fetchers **in parallel** across Celery workers |
+| **`chord(group)(callback)`** | Waits until **all 3 finish**, collects return values into a **list**, passes list as **first arg** to `run_mcp_enhanced_triage` |
+| **`.s(server_id)`** | Binds `server_id` as the **second** arg to the callback |
+
+```mermaid
+flowchart LR
+    Trigger[trigger_incident_workflow] --> Group
+
+    subgraph Group["group — parallel scatter"]
+        T1[fetch_datadog]
+        T2[fetch_github]
+        T3[fetch_slack]
+    end
+
+    Group -->|"all 3 succeed"| Chord["chord gather"]
+    Chord -->|"aggregated_logs list + server_id"| Triage[run_mcp_enhanced_triage]
+    Triage --> Agent[LangGraph + MCP]
+```
+
+**Without `chord`:** you would only have a `group` — no automatic callback with merged results.  
+**Without `group`:** you would run fetchers sequentially — slower, still no gather pattern.
+
+This is the full **Scatter-Gather** Celery Canvas pattern.
+
+### Full pipeline
 
 ```mermaid
 flowchart TB
@@ -89,13 +145,13 @@ flowchart TB
 
     subgraph Agent["LangGraph inside triage task"]
         A1[agent node — Gemini]
-        A2[execute_tools — MCP]
+        A2[execute_tools — MCP stdio today]
         A1 --> A2
         A2 --> A1
     end
 
     Triage --> Agent
-    A2 --> HR[hr_server.py via stdio]
+    A2 --> HR[hr_server.py]
     HR --> PG[(PostgreSQL)]
 ```
 
@@ -124,18 +180,16 @@ def run_mcp_enhanced_triage(aggregated_logs, server_id):
 
 Celery chord passes `aggregated_logs` as **first argument** automatically — list of three dicts from the group.
 
-### Section 2 — MCP + graph (lines 40–89)
+### Section 2 — MCP + graph (lines 41–94)
 
 | Lines | Purpose |
 |-------|---------|
-| 41 | LangChain Gemini chat model |
-| 42 | Path to shared `hr_server.py` |
-| 44–50 | Connect MCP server via stdio subprocess |
-| 52–54 | Convert MCP tools → LangChain; bind to LLM; create ToolNode |
-| 56–62 | Agent node + router (`should_continue`) |
-| 64–72 | Build and compile StateGraph |
-| 74–85 | Prompt with pre-fetched logs + instructions |
-| 85–89 | `ainvoke` graph; print final message |
+| 42 | LangChain Gemini chat model |
+| 43 | Path to shared `hr_server.py` |
+| 57–59 | `create_react_agent(llm, mcp_tools)` — ReAct + `add_messages` built-in |
+| 61–67 | Prompt with pre-fetched Celery logs |
+| 69 | `agent.ainvoke(...)` |
+| 71–95 | Commented manual graph + `Annotated[list, add_messages]` — use when adding HITL/routing |
 
 ### Section 3 — Trigger (lines 93–104)
 
@@ -158,7 +212,7 @@ workflow = chord(parallel_fetchers)(run_mcp_enhanced_triage.s(server_id))
 | Manager lookup | Hardcoded or guessed | Real Postgres via MCP |
 | File | Conceptual / earlier draft | `incidents/tasks.py` |
 
-Workstack implements **Version B**. Phase 4 in `organizations/` remains the minimal MCP loop reference.
+Workstack implements **Version B** using `create_react_agent(llm, mcp_tools)`. The manual `StateGraph` + `add_messages` pattern is preserved in **comments** in `tasks.py` for when you add custom workflow nodes. See [LANGGRAPH_DEEP_DIVE.md](LANGGRAPH_DEEP_DIVE.md) §7–8.
 
 ---
 
@@ -241,8 +295,21 @@ Exact wording varies — Gemini is non-deterministic. Success = tool was called 
 | `ModuleNotFoundError: langgraph` | Install LangChain stack in container |
 | `GEMINI_API_KEY` missing | Set in `.env`; restart celery |
 | Chord never runs callback | All group tasks must succeed; check fetcher errors |
-| MCP async context error | Use SSE daemon or stdio script with sync tools (see MCP_SSE_HTTP.md) |
-| Tool not called | Strengthen prompt; ensure author email exists in DB |
+| MCP async context error | Use SSE daemon or stdio with `--transport stdio` |
+| `Invalid JSON ... Starting MCP SSE Daemon` | Agent spawned hr_server without `--transport stdio` — see below |
+| `Invalid JSON ... Starting MCP SSE Daemon` | Pass `--transport stdio` in MCP client args; bare `hr_server.py` is SSE-only |
+| `ValueError: contents are required` | Use `create_react_agent` instead of manual `StateGraph` + sync `invoke` — Gemini tool messages need proper formatting |
+
+### stdio vs SSE on the same file
+
+`mcp_daemons/hr_server.py` supports both:
+
+```bash
+python mcp_daemons/hr_server.py              # SSE — Docker daemon
+python mcp_daemons/hr_server.py --transport stdio   # stdio — subprocess clients
+```
+
+Startup logs go to **stderr** in SSE mode so stdout stays JSON-RPC-clean in stdio mode.
 | Employee not found | Align `fetch_github_commits` author with real `User.username` |
 
 ---

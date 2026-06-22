@@ -13,9 +13,11 @@ What LangGraph is, how it differs from a raw MCP ReAct loop, and who makes decis
 3. [Who decides — LLM or graph?](#3-who-decides--llm-or-graph)
 4. [Nodes, edges, and conditional routing](#4-nodes-edges-and-conditional-routing)
 5. [ReAct loop vs state machine](#5-react-loop-vs-state-machine)
-6. [Line-by-line: incidents agent graph](#6-line-by-line-incidents-agent-graph)
-7. [When you need LangGraph vs when you don't](#7-when-you-need-langgraph-vs-when-you-dont)
-8. [FAQ](#8-faq)
+6. [Workstack incidents agent (current code)](#6-workstack-incidents-agent-current-code)
+7. [When to use `create_react_agent` vs `add_messages`](#7-when-to-use-create_react_agent-vs-add_messages)
+8. [Manual graph with `add_messages` (full reference)](#8-manual-graph-with-add_messages-full-reference)
+9. [When you need LangGraph vs when you don't](#9-when-you-need-langgraph-vs-when-you-dont)
+10. [FAQ](#10-faq)
 
 ---
 
@@ -103,15 +105,14 @@ stateDiagram-v2
     execute_tools --> agent
 ```
 
-In code (`apps/incidents/tasks.py`):
+In code (`apps/incidents/tasks.py` today):
 
 | Piece | Role |
 |-------|------|
-| `AgentState` | Typed dict holding `messages` list |
-| `call_model` | Node — invokes LLM with bound tools |
-| `should_continue` | Router — reads last message for `tool_calls` |
-| `ToolNode` | Node — runs MCP tools LangChain extracted |
-| `workflow.compile()` | Runnable graph |
+| `create_react_agent(llm, tools)` | Prebuilt graph — agent + ToolNode + `add_messages` |
+| `agent.ainvoke(...)` | Runs full ReAct loop until LLM stops calling tools |
+
+For a **manual** graph (commented in `tasks.py`), the same roles map to `AgentState`, `call_model`, `should_continue`, and `ToolNode`. See [§7](#7-when-to-use-create_react_agent-vs-add_messages) and [§8](#8-manual-graph-with-add_messages-full-reference).
 
 **Why nodes if the LLM decides tools anyway?**
 
@@ -140,92 +141,225 @@ ReAct (Reason + Act) is **one pattern** LangGraph can express. The graph general
 
 ---
 
-## 6. Line-by-line: incidents agent graph
+## 6. Workstack incidents agent (current code)
 
 File: `backend/apps/incidents/tasks.py`
 
-### State
+Workstack uses **`create_react_agent`** — LangGraph's prebuilt ReAct loop — not a hand-wired `StateGraph`:
 
 ```python
+from langgraph.prebuilt import create_react_agent
+
+mcp_tools = await mcp_client.get_tools()
+agent = create_react_agent(llm, mcp_tools)
+final_state = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]})
+```
+
+Under the hood, `create_react_agent` already uses **`MessagesState` with the `add_messages` reducer** — so message history is **appended**, not overwritten.
+
+---
+
+## 7. When to use `create_react_agent` vs `add_messages`
+
+Both solve the same core problem: **keeping full conversation history** across agent and tool nodes. The difference is *who wires it* — LangGraph maintainers or you.
+
+### The memory wipe bug (why `add_messages` exists)
+
+LangGraph state updates are **merges** by default. For a plain list field, merge means **replace**:
+
+```python
+# BROKEN for multi-turn agents — do not use without a reducer
 class AgentState(TypedDict):
-    messages: List[BaseMessage]
+    messages: list
 ```
 
-LangGraph passes this dict between nodes. Each node returns partial updates (e.g. new messages appended).
+| Step | Node output | State after update | Problem |
+|------|---------------|-------------------|---------|
+| 1 | `[HumanMessage(prompt)]` | `[Human]` | OK |
+| 2 | `[AIMessage(tool_calls=...)]` | `[AI]` only | **Prompt deleted** |
+| 3 | `[ToolMessage(result)]` | `[Tool]` only | **AI call deleted** |
+| 4 | Agent calls Gemini | `[Tool]` alone | `ValueError: contents are required` |
 
-### Celery callback entry
+The LLM wakes up with a raw DB row and zero conversational context.
+
+### What `add_messages` does
 
 ```python
-@shared_task
-def run_mcp_enhanced_triage(aggregated_logs, server_id):
-    return asyncio.run(_async_agent_execution(aggregated_logs, server_id))
+from typing import Annotated
+from langgraph.graph.message import add_messages
+
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages]
 ```
 
-Runs **after** chord gatherers finish. `aggregated_logs` is a list of the three fetcher dicts.
+Each node returns **new** messages; LangGraph **appends** them:
 
-### MCP + LangChain setup
-
-```python
-async with MultiServerMCPClient() as mcp_client:
-    await mcp_client.connect_to_server("workstack_hr", command="python", args=[server_path])
-    mcp_tools = mcp_client.get_tools()
+```
+[Human prompt] → [Human, AI tool_call] → [Human, AI, Tool result] → [Human, AI, Tool, AI reply]
 ```
 
-Spawns `hr_server.py` via stdio inside the agent task. See [LANGCHAIN_MCP_INTEGRATION.md](LANGCHAIN_MCP_INTEGRATION.md) for SSE production path.
+That is the minimum requirement for any multi-turn tool agent.
 
-### Bind tools to LLM
+---
+
+### Option A — `create_react_agent` (Workstack production default)
+
+**What it is:** LangGraph's prebuilt ReAct agent — a compiled graph with agent node, `ToolNode`, conditional edges, and **`add_messages` already configured**.
 
 ```python
+from langgraph.prebuilt import create_react_agent
+
+agent = create_react_agent(llm, mcp_tools)
+final_state = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]})
+```
+
+**Why use it:**
+
+| Reason | Detail |
+|--------|--------|
+| Correct message history | `add_messages` built-in — no wipe bug |
+| Less code | ~3 lines vs ~40 for equivalent manual graph |
+| Maintained by LangGraph | Survives SDK upgrades; fewer Gemini formatting edge cases |
+| Team readability | New engineers recognize standard ReAct pattern |
+| Production default | What most teams ship for "LLM + tools until done" |
+
+**When to use it:**
+
+- Standard **Reason → Act → Observe → Reason** loop
+- One LLM decides which MCP tool to call
+- No extra workflow nodes yet (no approval gates, no severity branches)
+- **Workstack incident triage today** — fetch logs via Celery, reason via ReAct + MCP
+
+**When you have outgrown it:**
+
+- Need a **human approval node** before external actions
+- Need **conditional routing** the prebuilt agent cannot express
+- Need **extra state** (`severity`, `approved`, `incident_id`) alongside messages
+
+---
+
+### Option B — Manual `StateGraph` + `add_messages`
+
+**What it is:** You define nodes, edges, and state yourself — but **must** use `Annotated[list, add_messages]` on the messages field.
+
+**Why use it:**
+
+| Reason | Detail |
+|--------|--------|
+| Custom workflow | Nodes that are not plain ReAct (classify → approve → act) |
+| Human-in-the-loop | Pause graph until operator approves |
+| Extra state fields | `severity: str`, `approved: bool` in same `TypedDict` |
+| Explicit control | You own every edge and retry policy |
+
+**When to use it:**
+
+- Incident severity **critical** → route to `human_approval` node before Slack
+- Separate **summarize** node with a cheap model, **act** node with tools
+- Compliance requires **auditable graph** with named steps
+- You need **checkpointing** with custom interrupt points
+
+**When not to use it:**
+
+- Simple ReAct + tools only — use `create_react_agent` instead
+- Team lacks LangGraph experience — manual graphs add maintenance cost
+
+---
+
+### Side-by-side decision table
+
+| Question | `create_react_agent` | Manual + `add_messages` |
+|----------|---------------------|-------------------------|
+| ReAct loop only? | **Yes — use this** | Unnecessary complexity |
+| Custom nodes beyond ReAct? | No | **Yes — use this** |
+| Who configures `add_messages`? | LangGraph (internal) | **You (required)** |
+| Risk of memory wipe bug? | Low | High if you forget reducer |
+| Lines of agent code | ~5 | ~40+ |
+| Workstack Phase 5 now | **Active in `tasks.py`** | Commented reference only |
+
+```mermaid
+flowchart TD
+    Start([Building an agent]) --> Q1{ReAct + tools only?}
+    Q1 -->|Yes| A[create_react_agent]
+    Q1 -->|No| Q2{Need HITL routing or extra state?}
+    Q2 -->|Yes| B["StateGraph + Annotated list add_messages"]
+    Q2 -->|No| A
+    A --> Ship[Ship to production]
+    B --> Ship
+```
+
+### Workstack roadmap
+
+| Phase | Agent pattern |
+|-------|---------------|
+| **Now** | `create_react_agent` + Celery chord + MCP stdio |
+| **Next** | Manual graph + `add_messages` when adding approval/routing nodes |
+| **Production MCP** | SSE URL to `mcp_hr_daemon` (see LANGCHAIN_MCP_INTEGRATION.md) |
+
+**Verdict:** `add_messages` is **required knowledge** for any LangGraph agent. **`create_react_agent` is the right default** because it applies that knowledge for you. Switch to manual graph + `add_messages` when workflow requirements exceed ReAct.
+
+---
+
+## 8. Manual graph with `add_messages` (full reference)
+
+This matches the **commented block** in `backend/apps/incidents/tasks.py`. Uncomment and remove `create_react_agent` only when you need custom nodes.
+
+```python
+from typing import Annotated, TypedDict
+from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+from langchain_core.messages import AIMessage, HumanMessage
+
+class AgentState(TypedDict):
+    # CRITICAL: Annotated + add_messages appends history; plain list replaces it
+    messages: Annotated[list, add_messages]
+
 tool_node = ToolNode(mcp_tools)
 llm_with_tools = llm.bind_tools(mcp_tools)
-```
 
-`ToolNode` knows how to execute LangChain-wrapped MCP tools when the LLM emits `tool_calls`.
+async def call_model(state: AgentState):
+    response = await llm_with_tools.ainvoke(state["messages"])
+    return {"messages": [response]}
 
-### Agent node
-
-```python
-def call_model(state: AgentState):
-    return {"messages": [llm_with_tools.invoke(state["messages"])]}
-```
-
-Calls Gemini with full message history. May return text **or** tool_calls.
-
-### Router
-
-```python
 def should_continue(state: AgentState):
-    if state["messages"][-1].tool_calls:
+    last = state["messages"][-1]
+    if isinstance(last, AIMessage) and last.tool_calls:
         return "execute_tools"
     return END
-```
 
-**Graph decision** — not LLM — to loop or finish.
-
-### Graph wiring
-
-```python
+workflow = StateGraph(AgentState)
 workflow.add_node("agent", call_model)
 workflow.add_node("execute_tools", tool_node)
 workflow.set_entry_point("agent")
 workflow.add_conditional_edges("agent", should_continue)
 workflow.add_edge("execute_tools", "agent")
+
 app = workflow.compile()
+final_state = await app.ainvoke({"messages": [HumanMessage(content=prompt)]})
 ```
 
-Classic **agent ↔ tools** cycle until LLM responds without tool_calls.
-
-### Invoke
+### Example: when you add a custom approval node (future)
 
 ```python
-final_output = await app.ainvoke({"messages": [HumanMessage(content=prompt)]})
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages]
+    approved: bool  # extra field — why manual graph beats create_react_agent
+
+async def human_approval(state: AgentState):
+    # Block until ops approves in UI / DB flag
+    ...
+
+workflow.add_node("human_approval", human_approval)
+workflow.add_conditional_edges("agent", route_by_severity)  # not plain ReAct
 ```
 
-Prompt includes pre-fetched logs from Celery — agent does not need MCP to fetch Datadog/GitHub/Slack.
+`create_react_agent` cannot express this without replacing the whole graph — that is the migration trigger.
+
+Compare to Phase 4 raw loop in `organizations/tasks.py` — same ReAct *idea*, different orchestration layer.
 
 ---
 
-## 7. When you need LangGraph vs when you don't
+## 9. When you need LangGraph vs when you don't
 
 | Use case | Recommendation |
 |----------|----------------|
@@ -237,7 +371,7 @@ Prompt includes pre-fetched logs from Celery — agent does not need MCP to fetc
 
 ---
 
-## 8. FAQ
+## 10. FAQ
 
 ### Is Phase 4 MCP demo-only?
 
@@ -246,6 +380,16 @@ No. It is a **valid production pattern** for simple tool calls. LangGraph adds *
 ### Can multiple MCP client/server pairs run without LangGraph?
 
 Yes. Phase 4 proves that. LangGraph organizes **orchestration**, not MCP transport.
+
+### What is `add_messages` vs `create_react_agent`?
+
+| | `add_messages` | `create_react_agent` |
+|---|----------------|---------------------|
+| **What** | A LangGraph **reducer** — appends messages instead of replacing | A **prebuilt graph** that already uses `add_messages` |
+| **When** | Any manual multi-turn agent graph | Standard ReAct + tools with no custom nodes |
+| **Workstack** | Commented reference in `tasks.py` | **Active production path** |
+
+You must understand `add_messages` even if you only use `create_react_agent` — it explains the `contents are required` bug. See [§7](#7-when-to-use-create_react_agent-vs-add_messages).
 
 ### Is MCP or LangGraph "better"?
 
