@@ -362,7 +362,7 @@ Phase 4 code in `apps/organizations/tasks.py` is **unchanged** — it remains th
 | [docs/AGENT_ARCHITECTURE.md](docs/AGENT_ARCHITECTURE.md) | Repo layout, `incidents` app, MCP vs LangGraph vs Celery |
 | [docs/LANGGRAPH_DEEP_DIVE.md](docs/LANGGRAPH_DEEP_DIVE.md) | LangGraph nodes, ReAct vs state machine, who decides |
 | [docs/LANGCHAIN_MCP_INTEGRATION.md](docs/LANGCHAIN_MCP_INTEGRATION.md) | `MultiServerMCPClient`, multi-server tools, Phase 4 vs 5 |
-| [docs/INCIDENT_TRIAGE_AGENT.md](docs/INCIDENT_TRIAGE_AGENT.md) | Automated Incident Triage — line-by-line code, how to test |
+| [docs/INCIDENT_TRIAGE_AGENT.md](docs/INCIDENT_TRIAGE_AGENT.md) | Automated Incident Triage — **22s log autopsy**, code map, tests |
 
 ### Infrastructure
 

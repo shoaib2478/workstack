@@ -4,12 +4,15 @@ End-to-end guide for the Phase 5 agent: Celery chord → LangGraph → MCP HR lo
 
 **Code:** `backend/apps/incidents/tasks.py`
 
+**Quick read:** [§0 — The Log Autopsy (22 seconds)](#0-quick-read--the-log-autopsy-22-seconds) — annotated Celery timestamps, sequence diagram, and phase-by-phase narrative.
+
 [← Architecture](AGENT_ARCHITECTURE.md) · [LangGraph](LANGGRAPH_DEEP_DIVE.md) · [LangChain + MCP](LANGCHAIN_MCP_INTEGRATION.md)
 
 ---
 
 ## Table of Contents
 
+0. [Quick read — The Log Autopsy (22 seconds)](#0-quick-read--the-log-autopsy-22-seconds)
 1. [What this agent does](#1-what-this-agent-does)
 2. [Prerequisites](#2-prerequisites)
 3. [Architecture walkthrough — group + chord](#3-architecture-walkthrough)
@@ -19,6 +22,168 @@ End-to-end guide for the Phase 5 agent: Celery chord → LangGraph → MCP HR lo
 7. [Expected output](#7-expected-output)
 8. [Troubleshooting](#8-troubleshooting)
 9. [Interview pitch](#9-interview-pitch)
+10. [Conclusion — what this flow proves](#10-conclusion--what-this-flow-proves)
+
+---
+
+## 0. Quick read — The Log Autopsy (22 seconds)
+
+**One real Celery run, annotated.** Timestamps below are from a successful production-style test (`Task succeeded in 22.17s`). Gemini wording varies run-to-run; the **orchestration sequence does not**.
+
+> **Note:** The mock GitHub author in `tasks.py` is currently `katrina@newhire.com`. An earlier run used `shuaib@workstack.dev` — same flow, different email in logs. Align the mock author with a real `User.username` in Postgres for a full manager lookup.
+
+### Complete flow (one glance)
+
+```mermaid
+sequenceDiagram
+    participant Shell as Django shell
+    participant Celery as Celery workers
+    participant Chord as Chord callback
+    participant LG as LangGraph ReAct
+    participant MCP as hr_server stdio
+    participant DB as PostgreSQL
+    participant Gemini as Gemini 2.5 Flash
+
+    Shell->>Celery: trigger_incident_workflow()
+    par Scatter ~1s total
+        Celery->>Celery: fetch_datadog_metrics
+        Celery->>Celery: fetch_github_commits
+        Celery->>Celery: fetch_slack_alerts
+    end
+    Celery->>Chord: aggregated_logs list
+    Chord->>LG: run_mcp_enhanced_triage
+    LG->>MCP: ListToolsRequest
+    MCP-->>LG: get_employee_manager schema
+    LG->>Gemini: prompt + logs + tool schemas
+    Gemini-->>LG: CallToolRequest
+    LG->>MCP: get_employee_manager email
+    MCP->>DB: ORM lookup sync_to_async
+    DB-->>MCP: user / manager / not found
+    MCP-->>LG: tool result
+    LG->>Gemini: full history + tool result
+    Note over Gemini: 503 UNAVAILABLE × 2<br/>langchain-google-genai auto-retry
+    Gemini-->>LG: final incident report
+    LG->>LG: extract_message_text
+    LG-->>Celery: plain string report
+```
+
+### Timeline breakdown
+
+| Phase | Timestamp | Duration | What happened |
+|-------|-----------|----------|---------------|
+| **Scatter** | `04:58:46.487` | ~1.0s | `fetch_github_commits` finished |
+| **Scatter** | `04:58:46.503` | ~1.0s | `fetch_slack_alerts` finished (parallel with Datadog + GitHub) |
+| **Gather** | `04:58:46.503` | instant | `run_mcp_enhanced_triage` received — chord bundled 3 JSON blobs into one list |
+| **ReAct Turn 1** | `04:58:46.503+` | ~3s | Agent spawned `hr_server.py --transport stdio`; `ListToolsRequest` → tool schemas |
+| **Gemini call 1** | `04:58:49.416` | ~3s | Gemini read logs, chose `get_employee_manager` instead of plain text |
+| **MCP tool** | `04:58:49.416+` | &lt;1s | `CallToolRequest` → live Postgres query via `sync_to_async` |
+| **503 drama** | `04:58:53.717` | +1.8s backoff | Gemini 503 — library retried automatically |
+| **503 drama** | `04:58:59.963` | +2.1s backoff | Second 503 — retried again |
+| **ReAct Turn 2** | `04:59:08.667` | ~8s | Gemini 200 OK — final report streamed |
+| **Done** | `04:59:08.675` | **22.17s total** | Task succeeded; plain-text report returned |
+
+```mermaid
+flowchart LR
+    A["0–1s<br/>Scatter<br/>3 parallel fetchers"] --> B["~1s<br/>Gather<br/>chord callback"]
+    B --> C["1–4s<br/>ReAct Turn 1<br/>ListTools + Gemini"]
+    C --> D["4–5s<br/>MCP CallTool<br/>Postgres lookup"]
+    D --> E["7–17s<br/>503 retries<br/>auto backoff"]
+    E --> F["17–22s<br/>ReAct Turn 2<br/>final report"]
+```
+
+---
+
+### The Scatter (parallel execution)
+
+```
+04:58:46,487: fetch_github_commits finished in 1.01 seconds.
+04:58:46,503: fetch_slack_alerts finished in 1.02 seconds.
+```
+
+**What happened:** Celery grabbed the three deterministic fetchers and ran them **simultaneously** on workers. Because we used a `group`, work that would take ~3 seconds sequentially finished in **~1 second**.
+
+---
+
+### The Gather (chord callback)
+
+```
+04:58:46,503: run_mcp_enhanced_triage received.
+```
+
+**What happened:** The instant the last parallel task finished, Celery's **chord** bundled the GitHub, Slack, and Datadog JSON into a single list and dispatched `run_mcp_enhanced_triage(aggregated_logs, server_id)`.
+
+---
+
+### LangGraph ReAct — Turn 1
+
+```
+04:58:46.503+: Processing request of type ListToolsRequest
+04:58:49,416: HTTP Request to Gemini ... "HTTP/1.1 200 OK"
+```
+
+**What happened:**
+
+1. The agent booted inside the Celery callback (`asyncio.run`).
+2. `MultiServerMCPClient` spawned `hr_server.py --transport stdio` and asked: *"What tools do you have?"*
+3. The daemon replied with the JSON schema for `get_employee_manager`.
+4. LangGraph sent **aggregated logs + prompt + tool schemas** to Gemini.
+5. Gemini read the logs, identified the breaking commit author, and returned a **tool call** (not final prose).
+
+---
+
+### MCP tool execution (live DB query)
+
+```
+04:58:49.416+: Processing request of type CallToolRequest
+```
+
+**What happened:** LangGraph intercepted the tool call and asked the FastMCP daemon to run `get_employee_manager(email=...)`. The daemon queried PostgreSQL via Django ORM wrapped in `sync_to_async`, then returned the result into the message history.
+
+In the annotated run, the email was `shuaib@workstack.dev` — **no matching `User.username`** in the local DB, so the tool returned an error string. The agent handled that gracefully in the final report.
+
+---
+
+### Fault tolerance — the 503 drama
+
+```
+04:58:53,717: HTTP Request to Gemini ... "HTTP/1.1 503 Service Unavailable"
+04:58:59,963: HTTP Request to Gemini ... "HTTP/1.1 503 Service Unavailable"
+Retrying google.genai._api_client... in 1.82 seconds
+Retrying google.genai._api_client... in 2.08 seconds
+```
+
+**What happened:** After appending the tool result, LangGraph sent the full conversation back to Gemini for synthesis. Google's API returned **503 UNAVAILABLE** (high demand).
+
+**Why this is good:** `langchain-google-genai` caught the HTTP error, applied **exponential backoff**, and retried — **without crashing the Celery worker** and without custom retry code in `tasks.py`.
+
+---
+
+### LangGraph ReAct — Turn 2 (final answer)
+
+```
+04:59:08,667: HTTP Request to Gemini ... "HTTP/1.1 200 OK"
+```
+
+**What happened:** On the third attempt, Gemini responded. It read the full history (prompt → tool call → tool result) and generated the incident report. `extract_message_text()` in `apps/incidents/parser.py` flattened Gemini's block-style content into a plain string for logging and the Celery return value.
+
+---
+
+### The result
+
+```
+04:59:08,671: --- FINAL AI AGENT OUTPUT ---
+Manager Contact: Attempted to retrieve manager details for shuaib@workstack.dev
+               but no user was found with that email.
+04:59:08,675: Task apps.incidents.tasks.run_mcp_enhanced_triage[...] succeeded in 22.17s
+```
+
+**What happened:** The agent **completed successfully**:
+
+- Identified the incident from parallel logs (CPU 99%, nginx commit, Slack 502s).
+- Called MCP and queried the real database.
+- Adapted when HR lookup failed — escalated to on-call instead of hallucinating a manager.
+
+**Time budget (~22s):** ~1s parallel fetch + ~3s first Gemini turn + ~10s Google outages/retries + ~8s final generation.
 
 ---
 
@@ -77,8 +242,8 @@ See [LANGCHAIN_MCP_INTEGRATION.md](LANGCHAIN_MCP_INTEGRATION.md) §8 for why `~=
 
 The agent calls `get_employee_manager` for the commit author email. Ensure a user exists:
 
-- Username/email: `shuaib@workstack.dev` (or match `fetch_github_commits` mock author)
-- Employee record with a manager in org chart
+- Username/email must match `fetch_github_commits` mock author (currently `katrina@newhire.com`)
+- Employee record with a manager in org chart (Treebeard parent)
 
 ---
 
@@ -247,15 +412,15 @@ You should see:
 4. LangGraph agent/tool cycles in logs
 5. `--- FINAL AI AGENT OUTPUT ---` printed
 
-### Step 4 — Optional: test MCP alone first
-
-Before spending Gemini quota:
+### Step 4 — Run automated flow tests
 
 ```bash
+# Unit tests (fetchers + parser) always run; full flow skips without GEMINI_API_KEY
+docker compose exec web python manage.py test apps.incidents.tests.test_triage_flow -v 2
+
+# MCP HR daemon alone (no Gemini)
 docker compose exec web python manage.py test apps.organizations.tests.test_mcp_sse -v 2
 ```
-
-Proves HR server works independently of LangGraph.
 
 ### Step 5 — Optional: test chord without AI
 
@@ -296,8 +461,7 @@ Exact wording varies — Gemini is non-deterministic. Success = tool was called 
 | `GEMINI_API_KEY` missing | Set in `.env`; restart celery |
 | Chord never runs callback | All group tasks must succeed; check fetcher errors |
 | MCP async context error | Use SSE daemon or stdio with `--transport stdio` |
-| `Invalid JSON ... Starting MCP SSE Daemon` | Agent spawned hr_server without `--transport stdio` — see below |
-| `Invalid JSON ... Starting MCP SSE Daemon` | Pass `--transport stdio` in MCP client args; bare `hr_server.py` is SSE-only |
+| `Invalid JSON ... Starting MCP SSE Daemon` | Pass `--transport stdio` in MCP client args; bare `hr_server.py` defaults to SSE |
 | `ValueError: contents are required` | Use `create_react_agent` instead of manual `StateGraph` + sync `invoke` — Gemini tool messages need proper formatting |
 
 ### stdio vs SSE on the same file
@@ -320,14 +484,42 @@ Startup logs go to **stderr** in SSE mode so stdout stays JSON-RPC-clean in stdi
 
 ---
 
+## 10. Conclusion — what this flow proves
+
+If you read the [22-second log autopsy](#0-quick-read--the-log-autopsy-22-seconds) end-to-end, you did not just call an LLM from a script. You built an **enterprise-style autonomous agent pipeline**.
+
+### You just built an enterprise autonomous agent
+
+| What you built | Where it showed up in the run |
+|----------------|------------------------------|
+| **Multi-node distributed orchestration** | Celery `group` + `chord` over RabbitMQ — three fetchers in parallel, one callback when all complete |
+| **Async ↔ sync bridge to legacy data** | MCP tool handler uses `sync_to_async` so FastMCP stays async while Django ORM hits PostgreSQL safely |
+| **Cognitive state machine with tool routing** | LangGraph ReAct loop — Gemini decides *when* to call `get_employee_manager`; MCP executes it over stdio JSON-RPC |
+| **Resilience without custom retry code** | Gemini returned 503 twice; `langchain-google-genai` backed off and retried — Celery worker kept state and finished |
+
+In one workflow you combined:
+
+1. **Scatter-gather** at the job queue layer (deterministic I/O).
+2. **Reasoning + tool selection** at the graph layer (non-deterministic AI).
+3. **Standard protocol tool execution** at the MCP layer (isolated process, live DB).
+4. **Production-grade fault tolerance** at the LLM client layer (transient API failures absorbed automatically).
+
+That is the pattern teams use for incident triage, internal copilots, and voice-AI backends: **orchestration outside the model, intelligence inside the graph, side effects through MCP.**
+
+Phase 4 proved the wire protocol. Phase 5 proves the **full agent loop** — from cluster fan-out to a manager-ready incident report, with real retries and real database lookups in the path.
+
+---
+
 ## Quick reference
 
 | Item | Location |
 |------|----------|
 | Agent tasks | `apps/incidents/tasks.py` |
+| Gemini output parser | `apps/incidents/parser.py` |
 | Phase 4 MCP (unchanged) | `apps/organizations/tasks.py` |
 | HR MCP server | `mcp_daemons/hr_server.py` |
 | Trigger | `trigger_incident_workflow()` |
+| Full flow tests | `apps/incidents/tests/test_triage_flow.py` |
 | MCP SSE test | `apps/organizations/tests/test_mcp_sse.py` |
 
 ---
