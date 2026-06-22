@@ -21,8 +21,7 @@ End-to-end guide for the Phase 5 agent: Celery chord → LangGraph → MCP HR lo
 6. [How to test](#6-how-to-test)
 7. [Expected output](#7-expected-output)
 8. [Troubleshooting](#8-troubleshooting)
-9. [Interview pitch](#9-interview-pitch)
-10. [Conclusion — what this flow proves](#10-conclusion--what-this-flow-proves)
+9. [Summary — what the pipeline delivers](#9-summary--what-the-pipeline-delivers)
 
 ---
 
@@ -478,35 +477,25 @@ Startup logs go to **stderr** in SSE mode so stdout stays JSON-RPC-clean in stdi
 
 ---
 
-## 9. Interview pitch
+## 9. Summary — what the pipeline delivers
 
-> I separate **deterministic I/O from non-deterministic AI reasoning**. A Celery **chord** fans out parallel API fetches across workers. When all context is gathered, the callback boots a **LangGraph** agent with **MCP tools** attached via LangChain adapters. The graph controls flow; Gemini chooses tools; MCP servers query our Django ORM in isolated processes. Phase 4 proved the MCP wire protocol; Phase 5 is the production agent pattern I'd use for incident triage or voice-AI backends at scale.
+The [22-second log autopsy](#0-quick-read--the-log-autopsy-22-seconds) shows the full path from Celery fan-out to a manager-ready incident report.
 
----
+| Capability | Where it runs |
+|------------|---------------|
+| **Multi-node orchestration** | Celery `group` + `chord` over RabbitMQ — parallel fetchers, single triage callback |
+| **Async ↔ sync DB access** | MCP tool handler uses `sync_to_async`; FastMCP stays async while Django ORM queries PostgreSQL |
+| **Agent flow + tool routing** | LangGraph ReAct — model chooses `get_employee_manager`; MCP executes over stdio JSON-RPC |
+| **LLM client resilience** | Transient Gemini 503 responses retried by `langchain-google-genai` without failing the Celery task |
 
-## 10. Conclusion — what this flow proves
+The workflow layers:
 
-If you read the [22-second log autopsy](#0-quick-read--the-log-autopsy-22-seconds) end-to-end, you did not just call an LLM from a script. You built an **enterprise-style autonomous agent pipeline**.
+1. **Scatter-gather** — Celery collects Datadog, GitHub, and Slack context in parallel.
+2. **Reasoning loop** — LangGraph drives tool selection and final report generation.
+3. **Tool execution** — MCP servers run in isolated processes with live database access.
+4. **Fault tolerance** — LLM client retries absorb transient API errors.
 
-### You just built an enterprise autonomous agent
-
-| What you built | Where it showed up in the run |
-|----------------|------------------------------|
-| **Multi-node distributed orchestration** | Celery `group` + `chord` over RabbitMQ — three fetchers in parallel, one callback when all complete |
-| **Async ↔ sync bridge to legacy data** | MCP tool handler uses `sync_to_async` so FastMCP stays async while Django ORM hits PostgreSQL safely |
-| **Cognitive state machine with tool routing** | LangGraph ReAct loop — Gemini decides *when* to call `get_employee_manager`; MCP executes it over stdio JSON-RPC |
-| **Resilience without custom retry code** | Gemini returned 503 twice; `langchain-google-genai` backed off and retried — Celery worker kept state and finished |
-
-In one workflow you combined:
-
-1. **Scatter-gather** at the job queue layer (deterministic I/O).
-2. **Reasoning + tool selection** at the graph layer (non-deterministic AI).
-3. **Standard protocol tool execution** at the MCP layer (isolated process, live DB).
-4. **Production-grade fault tolerance** at the LLM client layer (transient API failures absorbed automatically).
-
-That is the pattern teams use for incident triage, internal copilots, and voice-AI backends: **orchestration outside the model, intelligence inside the graph, side effects through MCP.**
-
-Phase 4 proved the wire protocol. Phase 5 proves the **full agent loop** — from cluster fan-out to a manager-ready incident report, with real retries and real database lookups in the path.
+Phase 4 covers the MCP wire protocol in `organizations/`. The incidents app runs the **full triage loop** — chord gather, agent execution, MCP lookup, and structured output via `apps/incidents/parser.py`.
 
 ---
 
