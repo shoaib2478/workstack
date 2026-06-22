@@ -21,6 +21,7 @@ This repository is the API layer. A React frontend (not included here) is expect
 - [Background Jobs (Celery)](#background-jobs-celery)
 - [Nginx & Static Files](#nginx--static-files)
 - [MCP Integration (AI Tools)](#mcp-integration-ai-tools)
+- [AI Agent Workflows (Phase 5)](#ai-agent-workflows-phase-5)
 - [Documentation Index](#documentation-index)
 
 ---
@@ -37,7 +38,8 @@ This repository is the API layer. A React frontend (not included here) is expect
 | **Production Docker** | Gunicorn, Nginx reverse proxy, shared static volume, health-aware entrypoint |
 | **Split settings** | `core.settings.local` vs `core.settings.production` |
 | **End-to-end invites** | Signed invite tokens (`TimestampSigner`), magic-link email task, org-chart placement on accept |
-| **MCP / AI tools** | Gemini + MCP loop (stdio for dev; SSE daemon for persistent production-style serving) |
+| **MCP / AI tools** | Gemini + MCP loop (stdio for dev; SSE daemon for production-style serving) |
+| **AI agents** | Celery Canvas + LangGraph + LangChain MCP adapters (`apps/incidents/`) |
 
 ---
 
@@ -60,11 +62,10 @@ This repository is the API layer. A React frontend (not included here) is expect
   │   worker    │   │ cache/results│   │   broker    │
   └──────┬──────┘   └─────────────┘   └─────────────┘
          │
-         │  (optional) HTTP/SSE
+         │  chord → LangGraph agent → MCP tools
          ▼
   ┌──────────────────┐
-  │ mcp_hr_daemon    │  MCP tools over SSE :8080
-  │ (hr_server.py)   │
+  │ mcp_hr_daemon    │  MCP SSE :8080 (hr_server.py)
   └──────────────────┘
 ```
 
@@ -89,7 +90,8 @@ workstack_project/
 ├── backend/
 │   ├── apps/
 │   │   ├── users/           # Auth, signup, JWT cookie login
-│   │   ├── organizations/   # Tenants, invites, Celery tasks, stdio MCP script
+│   │   ├── organizations/   # Phase 4: invites, MCP stdio tasks (unchanged)
+│   │   ├── incidents/       # Phase 5: Celery Canvas + LangGraph agents
 │   │   ├── rbac/            # Roles, permissions, RBACService
 │   │   └── hris/            # Employee org chart, ReBAC permissions
 │   ├── core/
@@ -315,15 +317,57 @@ The Celery tasks `run_ai_org_lookup` (stdio) and `run_ai_org_lookup_sse` (HTTP) 
 
 > **Status:** SSE daemon tested via `apps.organizations.tests.test_mcp_sse`. See [docs/MCP_SSE_HTTP.md](docs/MCP_SSE_HTTP.md).
 
+For the full agent stack (LangGraph + Celery Canvas), see [AI Agent Workflows](#ai-agent-workflows-phase-5).
+
+---
+
+## AI Agent Workflows (Phase 5)
+
+Production-style **AI agent** pattern: separate deterministic I/O from LLM reasoning.
+
+| Layer | Technology | Location |
+|-------|------------|----------|
+| **Muscle** | Celery `group` + `chord` | `apps/incidents/tasks.py` |
+| **Brain** | LangGraph `StateGraph` | Same file |
+| **Toolkit** | LangChain + Gemini | `ChatGoogleGenerativeAI`, `ToolNode` |
+| **Tools** | MCP via `MultiServerMCPClient` | Connects to `mcp_daemons/hr_server.py` |
+
+**Scenario:** Automated Incident Triage — parallel fetch from Datadog/GitHub/Slack, then LangGraph agent looks up commit author's manager via MCP and drafts an incident report.
+
+```python
+from apps.incidents.tasks import trigger_incident_workflow
+trigger_incident_workflow()
+```
+
+Phase 4 code in `apps/organizations/tasks.py` is **unchanged** — it remains the minimal MCP + Gemini reference.
+
+> **Architecture verdict:** Separate `incidents` app + shared `mcp_daemons/` is the recommended layout. See [docs/AGENT_ARCHITECTURE.md](docs/AGENT_ARCHITECTURE.md).
+
 ---
 
 ## Documentation Index
+
+### MCP (Phase 4)
 
 | Document | Description |
 |----------|-------------|
 | [docs/MCP_DEEP_DIVE.md](docs/MCP_DEEP_DIVE.md) | MCP concepts, transports (stdio vs SSE), FAQ, and protocol flow |
 | [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) | stdio integration: Host→Client→Server flow, `ToolConfig`, Gemini errors |
 | [docs/MCP_SSE_HTTP.md](docs/MCP_SSE_HTTP.md) | SSE/HTTP daemon: `hr_server.py`, `sync_to_async`, isolated testing |
+
+### AI Agents (Phase 5)
+
+| Document | Description |
+|----------|-------------|
+| [docs/AGENT_ARCHITECTURE.md](docs/AGENT_ARCHITECTURE.md) | Repo layout, `incidents` app, MCP vs LangGraph vs Celery |
+| [docs/LANGGRAPH_DEEP_DIVE.md](docs/LANGGRAPH_DEEP_DIVE.md) | LangGraph nodes, ReAct vs state machine, who decides |
+| [docs/LANGCHAIN_MCP_INTEGRATION.md](docs/LANGCHAIN_MCP_INTEGRATION.md) | `MultiServerMCPClient`, multi-server tools, Phase 4 vs 5 |
+| [docs/INCIDENT_TRIAGE_AGENT.md](docs/INCIDENT_TRIAGE_AGENT.md) | Automated Incident Triage — **22s log autopsy**, code map, tests |
+
+### Infrastructure
+
+| Document | Description |
+|----------|-------------|
 | [docs/CELERY_GEVENT.md](docs/CELERY_GEVENT.md) | Celery `--pool=gevent` for concurrent LLM/MCP I/O tasks |
 | [docs/WSGI_GEVENT_VS_ASGI.md](docs/WSGI_GEVENT_VS_ASGI.md) | WSGI+Gevent vs Uvicorn+ASGI vs DRF thread pool — scaling guide |
 
@@ -332,6 +376,15 @@ The Celery tasks `run_ai_org_lookup` (stdio) and `run_ai_org_lookup_sse` (HTTP) 
 ```bash
 docker compose up mcp_hr_daemon -d
 docker compose exec web python manage.py test apps.organizations.tests.test_mcp_sse -v 2
+```
+
+### Incident agent quick test
+
+```bash
+docker compose exec web python manage.py shell
+>>> from apps.incidents.tasks import trigger_incident_workflow
+>>> trigger_incident_workflow()
+# Watch: docker compose logs celery -f
 ```
 
 ---
