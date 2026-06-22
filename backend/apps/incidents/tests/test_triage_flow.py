@@ -14,8 +14,8 @@ import unittest
 
 from langchain_core.messages import AIMessage
 
+from apps.incidents.parser import extract_message_text
 from apps.incidents.tasks import (
-    extract_message_text,
     fetch_datadog_metrics,
     fetch_github_commits,
     fetch_slack_alerts,
