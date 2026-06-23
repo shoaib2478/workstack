@@ -9,6 +9,7 @@ Integration test environment:
     GEMINI_API_KEY         Required for test_full_triage_flow
     INCIDENT_TEST_EMAIL    Optional; must match fetch_github_commits author in DB
 """
+import asyncio
 import os
 import unittest
 
@@ -23,8 +24,28 @@ from apps.incidents.tasks import (
 )
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+MCP_SSE_URL = os.environ.get("MCP_SSE_URL", "http://workstack_mcp_hr:8080/sse")
 INCIDENT_TEST_SERVER = "srv-production-01"
 GITHUB_AUTHOR = "katrina@newhire.com"
+
+
+def _mcp_sse_reachable() -> tuple[bool, str]:
+    try:
+        from mcp import ClientSession
+        from mcp.client.sse import sse_client
+
+        async def ping():
+            async with sse_client(MCP_SSE_URL) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+
+        asyncio.run(ping())
+        return True, ""
+    except Exception as exc:
+        return False, (
+            f"MCP SSE daemon not reachable at {MCP_SSE_URL}: {exc}. "
+            "Start with: docker compose up mcp_hr_daemon"
+        )
 
 
 class ExtractMessageTextTest(unittest.TestCase):
@@ -100,7 +121,7 @@ class IncidentFetcherTest(unittest.TestCase):
 
 
 class IncidentTriageIntegrationTest(unittest.TestCase):
-    """End-to-end: aggregated logs → LangGraph ReAct → MCP stdio → Gemini report."""
+    """End-to-end: aggregated logs → LangGraph ReAct → MCP (SSE default) → Gemini report."""
 
     @classmethod
     def setUpClass(cls):
@@ -108,6 +129,11 @@ class IncidentTriageIntegrationTest(unittest.TestCase):
         if not GEMINI_API_KEY:
             cls.gemini_available = False
             cls.skip_reason = "GEMINI_API_KEY is not set"
+            return
+        reachable, reason = _mcp_sse_reachable()
+        if not reachable:
+            cls.gemini_available = False
+            cls.skip_reason = reason
             return
         cls.gemini_available = True
 
@@ -122,8 +148,12 @@ class IncidentTriageIntegrationTest(unittest.TestCase):
             fetch_slack_alerts(INCIDENT_TEST_SERVER),
         ]
 
-        report = run_mcp_enhanced_triage(aggregated_logs, INCIDENT_TEST_SERVER)
+        result = run_mcp_enhanced_triage(aggregated_logs, INCIDENT_TEST_SERVER, "test-run")
 
+        self.assertIsInstance(result, dict)
+        self.assertIn("report", result)
+        self.assertIn("run_id", result)
+        report = result["report"]
         self.assertIsInstance(report, str)
         self.assertGreater(len(report), 100)
         lowered = report.lower()

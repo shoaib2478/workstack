@@ -354,6 +354,8 @@ Phase 4 code in `apps/organizations/tasks.py` is **unchanged** — it remains th
 | [docs/MCP_DEEP_DIVE.md](docs/MCP_DEEP_DIVE.md) | MCP concepts, transports (stdio vs SSE), FAQ, and protocol flow |
 | [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) | stdio integration: Host→Client→Server flow, `ToolConfig`, Gemini errors |
 | [docs/MCP_SSE_HTTP.md](docs/MCP_SSE_HTTP.md) | SSE/HTTP daemon: `hr_server.py`, `sync_to_async`, isolated testing |
+| [docs/TRIAGE_PRODUCT.md](docs/TRIAGE_PRODUCT.md) | Triage product — chunking, live SSE UI, configurable integrations roadmap |
+| [docs/MCP_PROTOCOL_GAPS_AND_CONTRIBUTIONS.md](docs/MCP_PROTOCOL_GAPS_AND_CONTRIBUTIONS.md) | MCP production gaps (transport, payloads, scale) + fix status |
 
 ### AI Agents (Phase 5)
 
@@ -363,6 +365,9 @@ Phase 4 code in `apps/organizations/tasks.py` is **unchanged** — it remains th
 | [docs/LANGGRAPH_DEEP_DIVE.md](docs/LANGGRAPH_DEEP_DIVE.md) | LangGraph nodes, ReAct vs state machine, who decides |
 | [docs/LANGCHAIN_MCP_INTEGRATION.md](docs/LANGCHAIN_MCP_INTEGRATION.md) | `MultiServerMCPClient`, multi-server tools, Phase 4 vs 5 |
 | [docs/INCIDENT_TRIAGE_AGENT.md](docs/INCIDENT_TRIAGE_AGENT.md) | Automated Incident Triage — **22s log autopsy**, code map, tests |
+| [docs/INCIDENT_TRIAGE_LOCAL_TEST.md](docs/INCIDENT_TRIAGE_LOCAL_TEST.md) | **Local test walkthrough** — Phase 2 chunking output, Redis `:1:` prefix, get_chunk caveat |
+| [docs/INCIDENT_TRIAGE_QA.md](docs/INCIDENT_TRIAGE_QA.md) | Triage Q&A — chunking, Redis, run_id vs ref_id, LangGraph choices |
+| [docs/INCIDENT_TRIAGE_RESEARCH.md](docs/INCIDENT_TRIAGE_RESEARCH.md) | Product research — Pattern A/B/C, vector ingest roadmap, chunking as library |
 
 ### Infrastructure
 

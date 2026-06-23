@@ -173,6 +173,15 @@ CELERY_RESULT_BACKEND = env('CELERY_RESULT_BACKEND', default='redis://redis:6379
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 
+# MCP — incident triage agent
+MCP_SSE_URL = env('MCP_SSE_URL', default='http://workstack_mcp_hr:8080/sse')
+MCP_TRANSPORT = env('MCP_TRANSPORT', default='sse')  # sse | stdio
+
+# Triage — chunk large telemetry before LLM prompt
+TRIAGE_MAX_INLINE_CHARS = env.int('TRIAGE_MAX_INLINE_CHARS', default=8000)
+TRIAGE_CHUNK_SIZE = env.int('TRIAGE_CHUNK_SIZE', default=4000)
+TRIAGE_REFERENCE_TTL = env.int('TRIAGE_REFERENCE_TTL', default=3600)
+
 # Static files
 STATIC_URL = 'static/'
 # STATIC_ROOT = os.path.join(BASE_DIR, 'static')
