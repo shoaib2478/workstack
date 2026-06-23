@@ -24,5 +24,6 @@ urlpatterns = [
     path('api/v1/', include('apps.users.urls')),
     path('api/v1/rbac/', include('apps.rbac.urls')),
     path('api/v1/organizations/', include('apps.organizations.urls')),
-    path('api/v1/hris/', include('apps.hris.urls'))
+    path('api/v1/hris/', include('apps.hris.urls')),
+    path('api/v1/incidents/', include('apps.incidents.urls')),
 ]

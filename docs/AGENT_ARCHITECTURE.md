@@ -23,7 +23,7 @@ Where AI agent code lives in the repo, how it relates to Phase 4 MCP, and why `a
 | Phase | Name | Location | Pattern |
 |-------|------|----------|---------|
 | **4** | MCP proof-of-loop | `apps/organizations/tasks.py` | Raw Gemini SDK + MCP Client (stdio/SSE) |
-| **5** | Incident triage agent | `apps/incidents/tasks.py` | Celery Canvas + LangGraph + LangChain MCP adapter |
+| **5** | Incident triage agent | `apps/incidents/tasks.py` | Celery Canvas + LangGraph + SSE MCP (default) |
 
 Phase 4 implements: **Host → MCP Client → MCP Server → PostgreSQL → Gemini**.
 
@@ -41,7 +41,12 @@ workstack_project/
 │   │   │   ├── tasks.py       # run_ai_org_lookup, send_magic_link_email
 │   │   │   └── management/commands/mcp_org_server.py  # stdio dev server
 │   │   ├── incidents/         # Phase 5 — incident triage workflows
-│   │   │   └── tasks.py       # Celery chord + LangGraph + MCP
+│   │   │   ├── tasks.py       # Celery chord + LangGraph + MCP
+│   │   │   ├── chunking.py    # Log payload caps + Redis references
+│   │   │   ├── events.py      # Live triage checkpoints (Redis pub/sub)
+│   │   │   ├── mcp_client.py  # SSE MCP client factory
+│   │   │   ├── views.py       # Live stream API
+│   │   │   └── tests/
 │   │   ├── hris/              # Employee data (queried by MCP tools)
 │   │   ├── users/
 │   │   └── rbac/
@@ -167,7 +172,7 @@ Datadog, GitHub, and Slack fetchers in the example are **deterministic Celery ta
 | Shared MCP servers | `mcp_daemons/` — not owned by a single Django app |
 | Stable Phase 4 surface | `organizations/` kept for org lookup tasks; no LangGraph there |
 | Domain-driven Django apps | `incidents/` owns triage workflows and Celery canvas |
-| MCP deployment | SSE daemon in Docker; stdio subprocess from the triage worker |
+| MCP deployment | SSE daemon in Docker (`MCP_TRANSPORT=sse`); stdio for local dev only |
 
 ### Phase 4 vs Phase 5 — when each applies
 
@@ -176,9 +181,11 @@ Datadog, GitHub, and Slack fetchers in the example are **deterministic Celery ta
 | **Use case** | Direct org/HR lookup via Gemini + MCP | Incident triage with pre-fetched observability context |
 | **Orchestration** | Single Celery task, manual tool loop | Celery `group` + `chord`, then LangGraph ReAct |
 | **Flow control** | Gemini SDK tool loop | LangGraph graph (extensible for HITL, routing) |
-| **MCP transport** | stdio or SSE | stdio spawn from worker (SSE daemon optional) |
+| **MCP transport** | stdio or SSE | **SSE default** (`mcp_client.py`); stdio when daemon unavailable |
 
 Both phases call the same `mcp_daemons/hr_server.py` tools. Phase 5 does not replace Phase 4 — it adds a workflow layer for multi-step triage.
+
+See [MCP Protocol Gaps & Contributions](MCP_PROTOCOL_GAPS_AND_CONTRIBUTIONS.md) for production limitations (stdio trust, payload chunking, SSE scale) and the in-repo fix roadmap. Product strategy and Pattern A/B/C discussion: [INCIDENT_TRIAGE_RESEARCH.md](INCIDENT_TRIAGE_RESEARCH.md).
 
 ---
 

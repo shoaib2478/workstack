@@ -19,6 +19,15 @@ End-to-end guide for the Phase 5 agent: Celery chord → LangGraph → MCP HR lo
 4. [Line-by-line code map](#4-line-by-line-code-map)
 5. [Version A vs Version B](#5-version-a-vs-version-b)
 6. [How to test](#6-how-to-test)
+   - [6.1 Prerequisites](#61-prerequisites)
+   - [6.2 Start services](#62-start-services)
+   - [6.3 Preflight checks (no Gemini)](#63-preflight-checks-no-gemini)
+   - [6.4 Test chunking in shell](#64-test-chunking-in-shell) → [local walkthrough](INCIDENT_TRIAGE_LOCAL_TEST.md)
+   - [6.5 Full flow: Celery → LangGraph → LLM](#65-full-flow-celery--langgraph--llm)
+   - [6.6 Verify events / checkpoints (Redis)](#66-verify-events--checkpoints-redis)
+   - [6.7 Live checkpoint stream (SSE)](#67-live-checkpoint-stream-sse)
+   - [6.8 Automated tests](#68-automated-tests)
+   - [6.9 Sync debug (optional, no queue)](#69-sync-debug-optional-no-queue)
 7. [Expected output](#7-expected-output)
 8. [Troubleshooting](#8-troubleshooting)
 9. [Summary — what the pipeline delivers](#9-summary--what-the-pipeline-delivers)
@@ -244,6 +253,24 @@ The agent calls `get_employee_manager` for the commit author email. Ensure a use
 - Username/email must match `fetch_github_commits` mock author (currently `katrina@newhire.com`)
 - Employee record with a manager in org chart (Treebeard parent)
 
+### Environment variables (`.env`)
+
+```env
+GEMINI_API_KEY=your_key_here
+DATABASE_URL=postgres://workstackuser:workstack@db:5432/workstack
+CELERY_BROKER_URL=amqp://workstackuser:workstack@rabbitmq:5672//
+CELERY_RESULT_BACKEND=redis://redis:6379/2
+REDIS_URL=redis://redis:6379/1
+
+# Incident triage — defaults shown
+MCP_TRANSPORT=sse
+MCP_SSE_URL=http://workstack_mcp_hr:8080/sse
+TRIAGE_MAX_INLINE_CHARS=8000
+TRIAGE_CHUNK_SIZE=4000
+```
+
+After changing `.env`: `docker compose up -d --force-recreate web celery mcp_hr_daemon`
+
 ---
 
 ## 3. Architecture walkthrough
@@ -382,15 +409,141 @@ Workstack implements **Version B** using `create_react_agent(llm, mcp_tools)`. T
 
 ## 6. How to test
 
-### Step 1 — Confirm Celery worker sees tasks
+End-to-end manual runbook: Celery chord → chunking → LangGraph → Gemini → MCP (SSE) → live checkpoints.
+
+---
+
+### 6.1 Prerequisites
+
+| Requirement | Check |
+|-------------|--------|
+| Docker Compose running | `docker compose ps` — `web`, `celery`, `redis`, `rabbitmq`, `db`, **`mcp_hr_daemon`** up |
+| `GEMINI_API_KEY` in `.env` | `docker compose exec web printenv GEMINI_API_KEY \| head -c 8` (should not be empty) |
+| MCP SSE reachable from containers | Step 6.3 |
+| HR user for mock author (optional) | `katrina@newhire.com` in DB for successful manager lookup |
+
+---
+
+### 6.2 Start services
+
+From the project root:
 
 ```bash
-docker compose logs celery -f
+cd /path/to/workstack_project
+
+# Build after dependency changes
+docker compose build web celery mcp_hr_daemon
+
+# Core stack + MCP SSE daemon (required for default MCP_TRANSPORT=sse)
+docker compose up -d db redis rabbitmq web celery mcp_hr_daemon
 ```
 
-Look for registered task names including `apps.incidents.tasks`.
+Open **two terminals** for the full test:
 
-### Step 2 — Launch workflow from Django shell
+| Terminal | Purpose |
+|----------|---------|
+| **A** | `docker compose logs celery -f` |
+| **B** | Django shell + curl for checkpoints |
+
+---
+
+### 6.3 Preflight checks (no Gemini)
+
+**Celery sees incident tasks:**
+
+```bash
+docker compose logs celery 2>&1 | grep "apps.incidents.tasks"
+```
+
+You should see tasks such as `fetch_datadog_metrics`, `run_mcp_enhanced_triage`.
+
+**MCP SSE daemon (HR tools):**
+
+```bash
+docker compose exec web python manage.py test apps.organizations.tests.test_mcp_sse -v 2
+```
+
+**Chunking unit tests (Redis via Django cache):**
+
+```bash
+docker compose exec web python manage.py test apps.incidents.tests.test_chunking -v 2
+```
+
+---
+
+### 6.4 Test chunking in shell
+
+Verifies `chunking.py` + Redis **before** spending Gemini quota.
+
+**Detailed walkthrough with expected output:** [INCIDENT_TRIAGE_LOCAL_TEST.md](INCIDENT_TRIAGE_LOCAL_TEST.md) (Phase 2).
+
+```bash
+docker compose exec web python manage.py shell
+```
+
+```python
+from apps.incidents.tasks import (
+    fetch_datadog_metrics,
+    fetch_github_commits,
+    fetch_slack_alerts,
+)
+from apps.incidents.chunking import prepare_payload_for_prompt, get_chunk, build_chunked_log_context
+from django.test.utils import override_settings
+
+run_id = "shell-chunk-test"
+logs = [
+    fetch_datadog_metrics("srv-production-01"),
+    fetch_github_commits("srv-production-01"),
+    fetch_slack_alerts("srv-production-01"),
+]
+
+# Test A — mocks fit inline (no TRIAGE_REF)
+ctx, _payloads = build_chunked_log_context(logs, run_id)
+print(ctx[:500])
+assert "TRIAGE_REF" not in ctx
+
+# Test B — force chunking (must call get_chunk inside this block)
+with override_settings(TRIAGE_MAX_INLINE_CHARS=80, TRIAGE_CHUNK_SIZE=40):
+    big = {"source": "Datadog", "lines": ["ERROR " * 50]}
+    r = prepare_payload_for_prompt("Datadog", big, run_id)
+    print(r.truncated, r.reference_id, r.chunk_count)  # True, ref, 9
+    print(get_chunk(r.reference_id, 0))  # first 40 chars only
+    print(get_chunk(r.reference_id, 1))  # next 40 chars
+```
+
+**Verify Redis key exists (forced chunk path):**
+
+```bash
+docker compose exec redis redis-cli -n 1 KEYS "*triage:ref*"
+```
+
+**Expected (success — not an error):**
+
+```text
+1) ":1:triage:ref:shell-chunk-test:Datadog:6ff90bce"
+```
+
+| What you see | Meaning |
+|--------------|---------|
+| `:1:` prefix | Django Redis cache **version prefix** — added by `django.core.cache`, not a bug |
+| `triage:ref:...` | Your chunk reference from `chunking.py` |
+| Empty list | Chunking not triggered — use `override_settings(TRIAGE_MAX_INLINE_CHARS=80)` on a **large** payload |
+
+Read the stored blob (paste the full key from `KEYS` output):
+
+```bash
+docker compose exec redis redis-cli -n 1 GET ":1:triage:ref:shell-chunk-test:Datadog:6ff90bce"
+```
+
+**Note:** Checkpoint keys from `events.py` use **raw** Redis keys (`triage:run:<run_id>:events`) — **no** `:1:` prefix. Only `cache.set()` chunk refs get the prefix.
+
+The `version` attribute warning in `docker-compose.yml` is harmless (Compose v2 ignores it). You can remove line `version: '3.8'` to silence it.
+
+---
+
+### 6.5 Full flow: Celery → LangGraph → LLM
+
+**Terminal B — Django shell:**
 
 ```bash
 docker compose exec web python manage.py shell
@@ -398,32 +551,199 @@ docker compose exec web python manage.py shell
 
 ```python
 from apps.incidents.tasks import trigger_incident_workflow
-trigger_incident_workflow()
+
+result = trigger_incident_workflow()
+# Copy these — you need run_id for checkpoints
+print(result)
+# {'task_id': '...', 'run_id': 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'}
+run_id = result["run_id"]
 ```
 
-### Step 3 — Watch Celery logs
+**Terminal A — watch Celery (~20–30s):**
 
-You should see:
+Expected sequence:
 
-1. Three fetch tasks start and complete (~1s each, parallel)
-2. `run_mcp_enhanced_triage` starts
-3. MCP subprocess spawns (stdio) or connects to daemon
-4. LangGraph agent/tool cycles in logs
-5. `--- FINAL AI AGENT OUTPUT ---` printed
+```
+[INFO] Task ... fetch_datadog_metrics[...] succeeded
+[INFO] Task ... fetch_github_commits[...] succeeded
+[INFO] Task ... fetch_slack_alerts[...] succeeded
+[INFO] Task ... run_mcp_enhanced_triage[...] received
+... HTTP Request: POST .../gemini-2.5-flash:generateContent ...
+--- FINAL AI AGENT OUTPUT ---
+[INFO] Task ... run_mcp_enhanced_triage[...] succeeded
+```
 
-### Step 4 — Run automated flow tests
+What this proves:
+
+| Layer | Signal in logs |
+|-------|----------------|
+| Celery chord | Three fetchers succeed, then triage callback |
+| Chunking | No error before agent; large payloads would show `TRIAGE_REF` in prompt (mock data stays inline) |
+| MCP SSE | No `Invalid JSON ... Starting MCP SSE Daemon`; optional `ListToolsRequest` / tool calls |
+| LangGraph + Gemini | Multiple Gemini HTTP calls; tool call then final report |
+| `parser.py` | Final output is plain text, not a raw block list |
+
+Return value shape:
+
+```python
+{"run_id": "...", "report": "Emergency Incident Report: ..."}
+```
+
+---
+
+### 6.6 Verify events / checkpoints (Redis)
+
+After the run finishes, `events.py` should have written checkpoints for your `run_id`.
+
+**JSON API (poll after run):**
 
 ```bash
-# Unit tests (fetchers + parser) always run; full flow skips without GEMINI_API_KEY
-docker compose exec web python manage.py test apps.incidents.tests.test_triage_flow -v 2
-
-# MCP HR daemon alone (no Gemini)
-docker compose exec web python manage.py test apps.organizations.tests.test_mcp_sse -v 2
+curl -s http://localhost:8000/api/v1/incidents/runs/<run_id>/events/ | python3 -m json.tool
 ```
 
-### Step 5 — Optional: test chord without AI
+Expected stages (order may vary slightly):
 
-Temporarily replace callback with a print task to verify Canvas wiring before debugging LangGraph.
+| `stage` | Meaning |
+|---------|---------|
+| `triage.start` | Triage callback started |
+| `fetch.complete` | Chord logs received |
+| `chunk.complete` | `build_chunked_log_context` done |
+| `mcp.connect` | MCP client connecting |
+| `mcp.tools` | Tools loaded |
+| `agent.invoke` | LangGraph ReAct running |
+| `agent.complete` | Agent loop finished |
+| `triage.complete` | Report ready (`report_preview` in meta) |
+
+**Redis CLI (raw):**
+
+```bash
+docker compose exec redis redis-cli -n 1 LRANGE "triage:run:<run_id>:events" 0 -1
+```
+
+Newest events are at the head of the list (`LPUSH`). The JSON API returns them oldest-first.
+
+---
+
+### 6.7 Live checkpoint stream (SSE)
+
+Test **live** checkpoints while the run is in progress.
+
+**Option A — stream after trigger (replay + tail):**
+
+The stream endpoint sends **historical** events first, then subscribes to live pub/sub until `triage.complete`.
+
+```bash
+# Replace with run_id from trigger_incident_workflow()
+curl -N http://localhost:8000/api/v1/incidents/runs/<run_id>/stream/
+```
+
+Run `curl` within ~30s of triggering; you should see `data: {"stage": "triage.start", ...}` lines as JSON.
+
+**Option B — two terminals (best live demo):**
+
+1. Terminal B shell — generate `run_id` first:
+
+```python
+import uuid
+run_id = str(uuid.uuid4())
+print(run_id)
+```
+
+2. Terminal C — start stream **before** triggering chord:
+
+```bash
+curl -N http://localhost:8000/api/v1/incidents/runs/<run_id>/stream/
+```
+
+3. Terminal B — trigger chord with the **same** `run_id`:
+
+```python
+from celery import group, chord
+from apps.incidents.tasks import (
+    fetch_datadog_metrics,
+    fetch_github_commits,
+    fetch_slack_alerts,
+    run_mcp_enhanced_triage,
+)
+
+server_id = "srv-production-01"
+run_id = "<paste same uuid>"
+
+workflow = chord(group(
+    fetch_datadog_metrics.s(server_id),
+    fetch_github_commits.s(server_id),
+    fetch_slack_alerts.s(server_id),
+))(run_mcp_enhanced_triage.s(server_id, run_id))
+print(workflow.id)
+```
+
+Watch Terminal C — checkpoints appear in real time; stream closes after `triage.complete`.
+
+---
+
+### 6.8 Automated tests
+
+```bash
+# Unit: parser, fetchers, chunking (always)
+docker compose exec web python manage.py test \
+  apps.incidents.tests.test_triage_flow.ExtractMessageTextTest \
+  apps.incidents.tests.test_triage_flow.IncidentFetcherTest \
+  apps.incidents.tests.test_chunking -v 2
+
+# Integration: full agent (needs GEMINI_API_KEY + mcp_hr_daemon)
+docker compose exec web python manage.py test \
+  apps.incidents.tests.test_triage_flow.IncidentTriageIntegrationTest -v 2
+```
+
+---
+
+### 6.9 Sync debug (optional, no queue)
+
+Runs the triage callback **inside the shell process** — same code path as Celery, useful when debugging LangGraph/MCP without RabbitMQ timing.
+
+```bash
+docker compose exec web python manage.py shell
+```
+
+```python
+from apps.incidents.tasks import (
+    fetch_datadog_metrics,
+    fetch_github_commits,
+    fetch_slack_alerts,
+    run_mcp_enhanced_triage,
+)
+
+run_id = "sync-debug-001"
+aggregated = [
+    fetch_datadog_metrics("srv-production-01"),
+    fetch_github_commits("srv-production-01"),
+    fetch_slack_alerts("srv-production-01"),
+]
+
+result = run_mcp_enhanced_triage(aggregated, "srv-production-01", run_id)
+print(result["report"][:300])
+
+# Then verify checkpoints
+from apps.incidents.events import list_checkpoints
+print(list_checkpoints(run_id))
+```
+
+```bash
+curl -s http://localhost:8000/api/v1/incidents/runs/sync-debug-001/events/ | python3 -m json.tool
+```
+
+---
+
+### Quick checklist
+
+| Step | Command / action | Pass criteria |
+|------|------------------|---------------|
+| Services up | `docker compose ps` | `mcp_hr_daemon`, `celery`, `web` running |
+| MCP SSE | `test_mcp_sse` | Tool returns Manager/Error string |
+| Chunking | §6.4 forced `TRIAGE_REF` | `truncated=True`, Redis key exists |
+| Full flow | `trigger_incident_workflow()` | Celery task succeeded + report text |
+| Events | `curl .../events/` | 8 stages including `chunk.complete` |
+| Live SSE | `curl -N .../stream/` | JSON lines appear during run |
 
 ---
 
@@ -459,7 +779,11 @@ Exact wording varies — Gemini is non-deterministic. Success = tool was called 
 | `ModuleNotFoundError: langgraph` | Install LangChain stack in container |
 | `GEMINI_API_KEY` missing | Set in `.env`; restart celery |
 | Chord never runs callback | All group tasks must succeed; check fetcher errors |
-| MCP async context error | Use SSE daemon or stdio with `--transport stdio` |
+| MCP async context error | Use SSE daemon (`docker compose up mcp_hr_daemon`) or `MCP_TRANSPORT=stdio` |
+| MCP connection refused | `MCP_SSE_URL` must be `http://workstack_mcp_hr:8080/sse` from **inside** Docker network |
+| No checkpoints in Redis | Ensure `REDIS_URL=redis://redis:6379/1`; triage task must reach `publish_checkpoint` |
+| Empty `/events/` API | Wrong `run_id` or run failed before first checkpoint |
+| SSE stream hangs | Normal until events arrive; ends on `triage.complete` or 600s timeout |
 | `Invalid JSON ... Starting MCP SSE Daemon` | Pass `--transport stdio` in MCP client args; bare `hr_server.py` defaults to SSE |
 | `ValueError: contents are required` | Use `create_react_agent` instead of manual `StateGraph` + sync `invoke` — Gemini tool messages need proper formatting |
 
@@ -509,6 +833,9 @@ Phase 4 covers the MCP wire protocol in `organizations/`. The incidents app runs
 | HR MCP server | `mcp_daemons/hr_server.py` |
 | Trigger | `trigger_incident_workflow()` |
 | Full flow tests | `apps/incidents/tests/test_triage_flow.py` |
+| Chunking tests | `apps/incidents/tests/test_chunking.py` |
+| Triage product roadmap | [TRIAGE_PRODUCT.md](TRIAGE_PRODUCT.md) |
+| Design Q&A (chunking, Redis, LangGraph) | [INCIDENT_TRIAGE_QA.md](INCIDENT_TRIAGE_QA.md) |
 | MCP SSE test | `apps/organizations/tests/test_mcp_sse.py` |
 
 ---

@@ -33,6 +33,8 @@ For stdio subprocess MCP and `ToolConfig`, see [MCP_INTEGRATION.md](MCP_INTEGRAT
 
 When Celery uses stdio, each task forks `mcp_org_server.py`, calls `django.setup()`, queries Postgres, and exits. With SSE, `workstack_mcp_hr` boots once and serves tool calls over HTTP — Celery only opens a socket.
 
+For production gaps (stdio trust, log chunking, SSE scale) and Workstack's fix roadmap, see [MCP_PROTOCOL_GAPS_AND_CONTRIBUTIONS.md](MCP_PROTOCOL_GAPS_AND_CONTRIBUTIONS.md).
+
 ---
 
 ## 2. Architecture Overview
