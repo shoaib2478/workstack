@@ -93,6 +93,20 @@ services:
       - .env
     depends_on:
       - db
+
+  mcp_triage_daemon:
+    build:
+      context: ./backend
+    container_name: workstack_mcp_triage
+    command: python mcp_daemons/triage_server.py
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8090:8090"
+    env_file:
+      - .env
+    depends_on:
+      - redis
 volumes:
   postgres_data:
   static_volume: # Define the shared volume

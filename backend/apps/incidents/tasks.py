@@ -27,7 +27,16 @@ def fetch_datadog_metrics(server_id):
 @shared_task
 def fetch_github_commits(server_id):
     time.sleep(1)
-    return {"source": "GitHub", "recent_commit": "Update nginx config", "author": "katrina@newhire.com"}
+    # Payload is intentionally structured so that "author" appears past char ~160.
+    # With TRIAGE_CHUNK_SIZE=40 this puts the author in chunk 4, forcing the agent
+    # to call read_triage_chunk at least 4 times before it can identify the committer.
+    return {
+        "source": "GitHub",
+        "status": "success",
+        "pipeline": ["lint", "test", "build", "deploy"],
+        "recent_commit": "Update nginx config Update nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx configUpdate nginx config",
+        "author": "katrina@newhire.com",
+    }
 
 @shared_task
 def fetch_slack_alerts(server_id):
@@ -59,7 +68,7 @@ async def _async_agent_execution(aggregated_logs: list, server_id: str, run_id: 
 
     publish_checkpoint(run_id, "fetch.complete", "Context gathered from parallel fetchers")
     chunked_logs, chunk_payloads = build_chunked_log_context(aggregated_logs, run_id)
-    log_chunking_summary(chunk_payloads)  # TESTING — comment out after validation
+    # log_chunking_summary(chunk_payloads)  # Uncomment for local testing
     publish_checkpoint(
         run_id,
         "chunk.complete",
@@ -70,24 +79,36 @@ async def _async_agent_execution(aggregated_logs: list, server_id: str, run_id: 
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", api_key=api_key)
     mcp_client = build_mcp_client()
 
-    publish_checkpoint(run_id, "mcp.connect", "Connecting to HR MCP server")
+    publish_checkpoint(run_id, "mcp.connect", "Connecting to MCP servers (HR + Triage)")
     mcp_tools = await mcp_client.get_tools()
     publish_checkpoint(
         run_id,
         "mcp.tools",
         f"MCP tools ready ({len(mcp_tools)} available)",
         tool_count=len(mcp_tools),
+        tool_names=[t.name for t in mcp_tools],
     )
 
-    prompt = f"""CRITICAL INCIDENT ALERT for Server {server_id}.
-Pre-fetched logs (chunked for context limits):
-{chunked_logs}
+    truncated_sources = [p.source for p in chunk_payloads if p.truncated]
+    triage_ref_note = ""
+    if truncated_sources:
+        triage_ref_note = f"""
+IMPORTANT — TRUNCATED SOURCES: {', '.join(truncated_sources)}
+The logs above contain [TRIAGE_REF id=<reference_id> chunks=<N>] markers.
+These sources were too large to show inline. You MUST use the read_triage_chunk
+tool to retrieve the full content before drawing conclusions. Start with chunk_index=0.
+Example: read_triage_chunk(reference_id="<id from marker>", chunk_index=0)
+"""
 
+    prompt = f"""CRITICAL INCIDENT ALERT for Server {server_id}.
+Pre-fetched logs (some sources may be truncated — see TRIAGE_REF markers):
+{chunked_logs}
+{triage_ref_note}
 INSTRUCTIONS:
 1. Find out who made the breaking commit from the logs.
-2. Use your tools to look up that employee's manager.
-3. Draft an emergency incident report to the manager explaining the issue.
-4. If you see [TRIAGE_REF ...] markers, treat them as pointers to additional stored log data — summarize what you have inline first."""
+   - If the GitHub log is truncated, call read_triage_chunk to get the full payload.
+2. Use get_employee_manager to look up that commit author's manager.
+3. Draft an emergency incident report to the manager explaining the issue."""
 
     # -------------------------------------------------------------------------
     # ALTERNATIVE: Manual StateGraph + add_messages (commented — use when you need

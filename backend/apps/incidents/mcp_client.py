@@ -5,31 +5,61 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 
 
 def build_mcp_client() -> MultiServerMCPClient:
-    """Build MCP client — SSE to persistent daemon (default) or stdio for local dev."""
+    """
+    Build MCP client connecting to all Workstack tool servers.
+
+    Servers:
+        workstack_hr     — get_employee_manager (hr_server.py :8080)
+        workstack_triage — read_triage_chunk, list_triage_references (triage_server.py :8090)
+
+    Transport:
+        MCP_TRANSPORT=sse  (default) → HTTP/SSE to persistent daemons
+        MCP_TRANSPORT=stdio          → subprocess spawn (local dev without Docker daemons)
+    """
     transport = getattr(settings, "MCP_TRANSPORT", "sse")
 
     if transport == "stdio":
-        server_path = os.path.join(settings.BASE_DIR, "mcp_daemons", "hr_server.py")
+        base = settings.BASE_DIR
         return MultiServerMCPClient(
             {
                 "workstack_hr": {
                     "command": "python",
-                    "args": [server_path, "--transport", "stdio"],
+                    "args": [
+                        os.path.join(base, "mcp_daemons", "hr_server.py"),
+                        "--transport", "stdio",
+                    ],
                     "transport": "stdio",
-                }
+                },
+                "workstack_triage": {
+                    "command": "python",
+                    "args": [
+                        os.path.join(base, "mcp_daemons", "triage_server.py"),
+                        "--transport", "stdio",
+                    ],
+                    "transport": "stdio",
+                },
             }
         )
 
-    url = getattr(
+    hr_url = getattr(
         settings,
         "MCP_SSE_URL",
         os.environ.get("MCP_SSE_URL", "http://workstack_mcp_hr:8080/sse"),
     )
+    triage_url = getattr(
+        settings,
+        "MCP_TRIAGE_SSE_URL",
+        os.environ.get("MCP_TRIAGE_SSE_URL", "http://workstack_mcp_triage:8090/sse"),
+    )
     return MultiServerMCPClient(
         {
             "workstack_hr": {
-                "url": url,
+                "url": hr_url,
                 "transport": "sse",
-            }
+            },
+            "workstack_triage": {
+                "url": triage_url,
+                "transport": "sse",
+            },
         }
     )
