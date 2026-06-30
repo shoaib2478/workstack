@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    name: Django tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: workstack_test
+          POSTGRES_USER: workstackuser
+          POSTGRES_PASSWORD: workstack
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    defaults:
+      run:
+        working-directory: backend
+
+    env:
+      DJANGO_SETTINGS_MODULE: core.settings.ci
+      # Minimal secrets — real keys are never needed for unit tests
+      DJANGO_SECRET_KEY: ci-not-a-real-secret-key-for-testing
+      DJANGO_DEBUG: "False"
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      POSTGRES_DB: workstack_test
+      POSTGRES_USER: workstackuser
+      POSTGRES_PASSWORD: workstack
+      DATABASE_URL: postgres://workstackuser:workstack@localhost:5432/workstack_test
+      REDIS_URL: redis://localhost:6379/1
+      CELERY_BROKER_URL: redis://localhost:6379/0
+      CELERY_RESULT_BACKEND: redis://localhost:6379/2
+      # Dummy keys — MCP/LLM integration tests auto-skip when unreachable
+      GEMINI_API_KEY: ci-dummy
+      MCP_TRANSPORT: sse
+      MCP_SSE_URL: http://localhost:8080/sse
+      MCP_TRIAGE_SSE_URL: http://localhost:8090/sse
+      TRIAGE_MAX_INLINE_CHARS: "8000"
+      TRIAGE_CHUNK_SIZE: "4000"
+      TRIAGE_REFERENCE_TTL: "3600"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements/local.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements/local.txt
+
+      - name: Run migrations
+        run: python manage.py migrate --noinput
+
+      - name: Check for missing migrations
+        # Catches developers who changed models but forgot makemigrations
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Run unit + integration tests (skip LLM/MCP)
+        run: |
+          python manage.py test \
+            apps.incidents.tests.test_chunking \
+            apps.incidents.tests.test_triage_flow \
+            --verbosity 2
