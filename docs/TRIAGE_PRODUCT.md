@@ -234,7 +234,7 @@ Implemented as `mcp_daemons/slack_server.py` with tools `post_incident_update(ch
 | **1** | SSE MCP in LangGraph path | Done |
 | **1** | Chunking + Redis references | Done |
 | **1** | Live checkpoint SSE API | Done |
-| **2** | `read_triage_chunk` MCP tool | Planned |
+| **2** | `read_triage_chunk` MCP tool | Done |
 | **2** | Triage config YAML + real Datadog fetcher | Planned |
 | **3** | React live triage panel | Planned |
 | **4** | Slack MCP + notification config | Planned |
