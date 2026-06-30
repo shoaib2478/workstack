@@ -654,6 +654,374 @@ Task ... run_mcp_enhanced_triage succeeded in 18.61s
 
 ---
 
+---
+
+## Phase 6 — `read_triage_chunk` MCP tool
+
+**What ships:** `mcp_daemons/triage_server.py` — a second MCP daemon with two tools:
+
+| Tool | Purpose |
+|------|---------|
+| `read_triage_chunk(reference_id, chunk_index)` | Pull a 4 000-char slice of a large stored payload |
+| `list_triage_references(run_id)` | Discover what reference_ids exist for a run |
+
+When a source is truncated the agent now sees an explicit instruction in the prompt:
+
+```
+IMPORTANT — TRUNCATED SOURCES: GitHub
+...
+You MUST use the read_triage_chunk tool to retrieve the full content before drawing
+conclusions. Start with chunk_index=0.
+```
+
+---
+
+### 6-A  Unit tests (no daemon needed)
+
+These tests hit Redis directly via `store_reference` / `get_chunk`, the same path
+`triage_server.py` uses internally.
+
+```bash
+docker compose exec web python manage.py test apps.incidents.tests.test_chunking -v 2
+```
+
+**Expected output:**
+
+```
+test_all_chunks_reassemble_full_text ... ok
+test_chunk_count_matches_ceiling_division ... ok
+test_chunk_one_returns_second_slice ... ok
+test_chunk_zero_returns_first_slice ... ok
+test_last_chunk_does_not_overflow ... ok
+test_missing_reference_returns_error_message ... ok
+test_out_of_range_chunk_returns_error_message ... ok
+test_triage_ref_marker_contains_chunk_count ... ok
+test_triage_ref_marker_contains_reference_id ... ok
+...
+Ran 12 tests in 0.XXXs
+OK
+```
+
+---
+
+### 6-B  Start the triage MCP daemon
+
+```bash
+# Re-build to pick up the new triage_server.py
+docker compose up -d --build mcp_triage_daemon
+
+# Verify it started
+docker compose logs mcp_triage_daemon
+# Expected: "Starting MCP Triage Daemon on port 8090..."
+
+# Check SSE endpoint responds
+curl -s --max-time 3 http://localhost:8090/sse
+# Expected: keeps connection open (event stream); Ctrl-C to break
+```
+
+---
+
+### 6-C  Verify tools are registered
+
+```bash
+docker compose exec web python manage.py shell
+```
+
+```python
+import asyncio
+from apps.incidents.mcp_client import build_mcp_client
+
+client = build_mcp_client()
+tools = asyncio.run(client.get_tools())
+print([t.name for t in tools])
+# Expected (order may vary):
+# ['get_employee_manager', 'read_triage_chunk', 'list_triage_references']
+```
+
+---
+
+### 6-D  Shell exercise: store a reference, then call the tool
+
+```python
+# Inside docker compose exec web python manage.py shell
+from django.test.utils import override_settings
+
+with override_settings(TRIAGE_MAX_INLINE_CHARS=50, TRIAGE_CHUNK_SIZE=40, TRIAGE_REFERENCE_TTL=300):
+    from apps.incidents.chunking import prepare_payload_for_prompt, get_chunk
+
+    payload = {
+        "source": "GitHub",
+        "recent_commit": "Update nginx config",
+        "author": "katrina@newhire.com",
+        "files_changed": ["nginx.conf", "docker-compose.yml", "README.md"],
+    }
+
+    result = prepare_payload_for_prompt("GitHub", payload, "shell-phase6")
+    print("truncated:", result.truncated)
+    print("chunks   :", result.chunk_count)
+    print("ref id   :", result.reference_id)
+    print("inline   :\n", result.inline[:200])
+    print()
+
+    # Now simulate what the MCP tool does
+    for i in range(result.chunk_count):
+        chunk = get_chunk(result.reference_id, i)
+        print(f"--- chunk {i} ({len(chunk)} chars) ---")
+        print(chunk[:120])
+```
+
+**Actual output (from real run):**
+
+```
+truncated: True
+chunks   : 5
+ref id   : shell-phase6:GitHub:894d9f4d
+inline   :
+ {
+  "source": "GitHub",
+  "recent_commit": "Update
+
+[TRIAGE_REF source=GitHub id=shell-phase6:GitHub:894d9f4d total_chars=187 chunks=5 inline_limit=50]
+
+--- chunk 0 (40 chars) ---
+{
+  "source": "GitHub",
+  "recent_commit
+--- chunk 1 (40 chars) ---
+": "Update nginx config",
+  "author": "k
+--- chunk 2 (40 chars) ---
+atrina@newhire.com",
+  "files_changed":
+--- chunk 3 (40 chars) ---
+[
+    "nginx.conf",
+    "docker-compose.
+--- chunk 4 (27 chars) ---
+yml",
+    "README.md"
+  ]
+}
+```
+
+> **Why 5 chunks, not 4?** The actual serialised JSON is 187 chars. `ceil(187 / 40) = 5`. The number depends on the exact JSON Django produces (indentation, field order). The inline limit (50 chars) only controls what sits in the prompt — all 5 chunks cover the full payload.
+>
+> **Where is the author?** `"katrina@newhire.com"` starts mid-way through chunk 1 and finishes in chunk 2. Gemini must call `read_triage_chunk` at least twice to find it.
+
+---
+
+### 6-E  Full flow: force `read_triage_chunk` to be called
+
+#### Why the previous run did NOT call `read_triage_chunk`
+
+The old mock payload was:
+```python
+{"source": "GitHub", "recent_commit": "Update nginx config", "author": "katrina@newhire.com"}
+```
+Serialised JSON: **101 chars**. With `CHUNK_SIZE=40`, the author `katrina@newhire.com` sits in chunk **1** (chars 40–79). Gemini finds it in one or two calls and stops — no multi-chunk excavation.
+
+Additionally, changing the code defaults in `chunking.py` does nothing because Django reads the value from settings first (`getattr(settings, "TRIAGE_MAX_INLINE_CHARS", ...)`), which is populated from `.env` via `base.py`. The code defaults only apply when no setting or env var exists at all.
+
+#### What was fixed
+
+`fetch_github_commits` now returns a structured payload where `"author"` is deliberately placed past char 163:
+
+```python
+{
+    "source": "GitHub",
+    "status": "success",
+    "pipeline": ["lint", "test", "build", "deploy"],
+    "recent_commit": "Update nginx config",
+    "author": "katrina@newhire.com",   # char 163 → chunk 4
+}
+```
+
+Serialised (195 chars total, `CHUNK_SIZE=40`, `INLINE_LIMIT=50`):
+
+```
+Inline (0–50 chars, sent in prompt):
+  '{\n  "source": "GitHub",\n  "status": "success",\n  "'
+  ↑ cuts mid-word — author is nowhere here
+
+chunk 0  (chars   0– 39): '{\n  "source": "GitHub",\n  "status": "suc'
+chunk 1  (chars  40– 79): 'cess",\n  "pipeline": [\n    "lint",\n    "'
+chunk 2  (chars  80–119): 'test",\n    "build",\n    "deploy"\n  ],\n  '
+chunk 3  (chars 120–159): '"recent_commit": "Update nginx config",\n'
+chunk 4  (chars 160–194): '  "author": "katrina@newhire.com"\n}'  ← HERE
+```
+
+Gemini must call `read_triage_chunk` **5 times** (chunks 0–4) before it finds the author.
+
+---
+
+#### Prerequisites — `.env` already configured
+
+Your `.env` already has:
+```
+TRIAGE_MAX_INLINE_CHARS=50
+TRIAGE_CHUNK_SIZE=40
+```
+
+Restart Celery to pick up the new mock payload code:
+
+```bash
+docker compose restart celery
+docker compose logs celery --tail=10
+# Expected: "celery@... ready"
+```
+
+---
+
+#### Step 1 — pre-pick a `run_id` and open the live stream
+
+Open **Terminal 1** (SSE stream — must be open BEFORE the chord fires):
+
+```bash
+export RUN_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
+echo "run_id: $RUN_ID"
+curl -N http://localhost:8000/api/v1/incidents/runs/$RUN_ID/stream/
+```
+
+---
+
+#### Step 2 — trigger the chord with the same `run_id`
+
+Open **Terminal 2**:
+
+```bash
+docker compose exec web python manage.py shell
+```
+
+```python
+# trigger_incident_workflow() is a plain function — not a @shared_task.
+# It builds the chord internally. Do NOT use .delay() on it.
+# To supply your own run_id, build the chord manually:
+
+from celery import group, chord
+from apps.incidents.tasks import (
+    fetch_datadog_metrics,
+    fetch_github_commits,
+    fetch_slack_alerts,
+    run_mcp_enhanced_triage,
+)
+
+run_id = "<paste $RUN_ID from Terminal 1>"
+server_id = "srv-production-01"
+
+result = chord(
+    group(
+        fetch_datadog_metrics.s(server_id),
+        fetch_github_commits.s(server_id),
+        fetch_slack_alerts.s(server_id),
+    )
+)(run_mcp_enhanced_triage.s(server_id, run_id))
+
+print("chord launched, task id:", result.id)
+```
+
+---
+
+#### Step 3 — watch the SSE stream (Terminal 1)
+
+You will see events arrive in order:
+
+```
+data: {"stage": "triage.start",   "message": "Starting triage for srv-production-01"}
+data: {"stage": "fetch.complete",  "message": "Context gathered from parallel fetchers"}
+data: {"stage": "chunk.complete",  "message": "...", "sources": [
+         {"source": "GitHub", "truncated": true, "chunk_count": 5}   ← truncated
+       ]}
+data: {"stage": "mcp.connect",    "message": "Connecting to MCP servers (HR + Triage)"}
+data: {"stage": "mcp.tools",      "tool_count": 3, "tool_names": [...]}
+data: {"stage": "agent.invoke",   "message": "LangGraph ReAct agent running"}
+... (Gemini calls read_triage_chunk 5× then get_employee_manager) ...
+data: {"stage": "agent.complete", "message": "Agent finished reasoning loop"}
+data: {"stage": "triage.complete","report_preview": "..."}
+```
+
+---
+
+#### Step 4 — watch Celery logs (Terminal 3)
+
+```bash
+docker compose logs -f celery
+```
+
+You should see the ReAct loop making **5 chunk calls then 1 HR call**:
+
+```
+Processing request of type CallToolRequest  ← read_triage_chunk chunk 0
+Processing request of type CallToolRequest  ← read_triage_chunk chunk 1
+Processing request of type CallToolRequest  ← read_triage_chunk chunk 2
+Processing request of type CallToolRequest  ← read_triage_chunk chunk 3
+Processing request of type CallToolRequest  ← read_triage_chunk chunk 4  (author found)
+Processing request of type CallToolRequest  ← get_employee_manager
+```
+
+---
+
+#### Step 5 — verify events JSON
+
+```bash
+curl -s "http://localhost:8000/api/v1/incidents/runs/<run_id>/events/" | python3 -m json.tool
+```
+
+The `chunk.complete` event should confirm GitHub was truncated:
+
+```json
+{
+  "stage": "chunk.complete",
+  "sources": [
+    {"source": "Datadog", "truncated": false, "total_chars": 71,  "chunk_count": 1},
+    {"source": "GitHub",  "truncated": true,  "total_chars": 195, "chunk_count": 5},
+    {"source": "Slack",   "truncated": false, "total_chars": 93,  "chunk_count": 1}
+  ]
+}
+```
+
+---
+
+#### Step 6 — reset env after testing
+
+```bash
+# Remove or update these lines in .env:
+TRIAGE_MAX_INLINE_CHARS=8000
+TRIAGE_CHUNK_SIZE=4000
+
+docker compose restart celery
+```
+
+> **Note:** The new `fetch_github_commits` payload stays in place — it is more realistic than the original one-liner and still fits inline under the production `TRIAGE_MAX_INLINE_CHARS=8000` default, so normal runs are unaffected.
+
+---
+
+### 6-F  Preflight check — verify triage SSE is reachable
+
+```python
+# docker compose exec web python manage.py shell
+import urllib.request
+try:
+    r = urllib.request.urlopen("http://workstack_mcp_triage:8090/sse", timeout=3)
+    print("reachable — status", r.status)
+except Exception as e:
+    print("NOT reachable:", e)
+```
+
+---
+
+### Phase 6 checklist
+
+| Check | Expected | Verified |
+|-------|----------|----------|
+| All 12 unit tests pass | `Ran 12 tests ... OK` | |
+| `mcp_triage_daemon` starts on :8090 | `Starting MCP Triage Daemon` log line | |
+| `get_tools()` returns 3 tools | `read_triage_chunk` in list | ✓ `tool_count: 3` confirmed |
+| `mcp.tools` checkpoint has `tool_count=3` | JSON event | ✓ `5dab89bb` run |
+| Shell 6-D: chunks=5 for 187-char payload | `ceil(187/40)=5` | ✓ `894d9f4d` ref |
+| Agent calls `read_triage_chunk` when truncated | Celery log: 2+ chunk calls before `get_employee_manager` | → Run 6-E to verify |
+
+---
+
 ## All phases checklist
 
 | Phase | What | Status |
@@ -663,15 +1031,15 @@ Task ... run_mcp_enhanced_triage succeeded in 18.61s
 | **3** | Celery → LangGraph → MCP → Gemini | |
 | **4** | `/events/` JSON + `chunk.complete.sources` | |
 | **5** | `/stream/` live SSE | |
+| **6** | `read_triage_chunk` tool + agent auto-reads truncated sources | |
 
 ---
 
-## Next
+## Notes
 
-→ Reset `TRIAGE_MAX_INLINE_CHARS=8000` after truncate testing  
-→ Comment out `log_chunking_summary(chunk_payloads)` in `tasks.py`  
-→ Build **`read_triage_chunk` MCP tool** so agent can read Redis refs when truncated  
-→ [INCIDENT_TRIAGE_AGENT.md §6](INCIDENT_TRIAGE_AGENT.md#6-how-to-test) — full runbook
+- `log_chunking_summary` is commented out in `tasks.py` — uncomment the line to
+  re-enable debug output while testing locally.
+- Reset `TRIAGE_MAX_INLINE_CHARS=8000` in `.env` after truncation testing.
 
 ---
 

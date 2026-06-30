@@ -175,6 +175,7 @@ CELERY_TASK_SERIALIZER = 'json'
 
 # MCP — incident triage agent
 MCP_SSE_URL = env('MCP_SSE_URL', default='http://workstack_mcp_hr:8080/sse')
+MCP_TRIAGE_SSE_URL = env('MCP_TRIAGE_SSE_URL', default='http://workstack_mcp_triage:8090/sse')
 MCP_TRANSPORT = env('MCP_TRANSPORT', default='sse')  # sse | stdio
 
 # Triage — chunk large telemetry before LLM prompt

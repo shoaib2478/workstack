@@ -40,15 +40,110 @@ End-to-end guide for the Phase 5 agent: Celery chord → LangGraph → MCP HR lo
 
 > **Note:** The mock GitHub author in `tasks.py` is currently `katrina@newhire.com`. An earlier run used `shuaib@workstack.dev` — same flow, different email in logs. Align the mock author with a real `User.username` in Postgres for a full manager lookup.
 
-### Complete flow (one glance)
+---
+
+### What "inline" means
+
+Throughout this document the word **inline** means text that is **directly embedded inside the prompt string** sent to Gemini — the opposite of "stored in Redis."
+
+```
+Prompt string sent to Gemini
+┌──────────────────────────────────────────────────────────────────┐
+│  CRITICAL INCIDENT ALERT for server-042                          │
+│                                                                  │
+│  ### Datadog                                                     │
+│  {"cpu_usage": "99%", "status": "critical"}    ← INLINE (small) │
+│                                                                  │
+│  ### GitHub                                                      │
+│  {"source": "Gith                              ← INLINE (first   │
+│                                                   N chars only)  │
+│  [TRIAGE_REF id=run-x:GitHub:abc chunks=7]    ← reference marker│
+│  ...rest of 312 chars is in Redis, NOT here                      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+If a payload is small enough it is entirely inline (full content in prompt).  
+If it is large, only the first `TRIAGE_MAX_INLINE_CHARS` are inline; the rest sits in Redis, represented by a `[TRIAGE_REF ...]` marker.
+
+---
+
+### What the tool docstring does
+
+In `triage_server.py` the `read_triage_chunk` docstring starts with:
+
+```
+Use this tool when you see a [TRIAGE_REF ...] marker in the logs.
+```
+
+This is **not** a comment for humans. When LangGraph calls `ListToolsRequest` on startup, the MCP server sends Gemini the function signature **plus the full docstring** as the tool's description. Gemini reads it to decide *when* and *how* to call the tool. Writing clear instructions in the docstring is how you guide the LLM's tool-use decisions.
+
+---
+
+### Before chunking + `read_triage_chunk` vs. now
+
+#### Phase 3 behaviour (no chunking, no triage tool)
+
+```
+Chord → agent
+  ↓
+Entire raw log JSON dumped into prompt string (inline) → sent to Gemini
+  ↓ Problem: if logs exceed Gemini context window → API error / truncation
+  ↓ No Redis storage, no reference markers
+```
+
+#### Phase 5 behaviour (chunking added, but no triage MCP tool yet)
+
+```
+Chord → build_chunked_log_context()
+  ↓
+Small payloads   → full JSON inline in prompt        (Gemini sees everything)
+Large payloads   → first N chars inline + [TRIAGE_REF id=xxx chunks=7]
+
+  ↓ Prompt sent to Gemini
+Gemini SEES the [TRIAGE_REF] marker as plain text
+Gemini CANNOT call any tool to retrieve remaining chunks
+  ↓
+Agent works only with the inline portion
+If commit author happened to be in the first N chars → works fine
+If commit author was beyond the inline limit → agent misses it or says
+"I cannot determine the author from the provided logs"
+```
+
+#### Now — Phase 6 (chunking + `read_triage_chunk` MCP tool)
+
+```
+Chord → build_chunked_log_context()
+  ↓
+Same inline/Redis split as Phase 5, PLUS:
+  - Prompt now includes explicit instruction: "MUST use read_triage_chunk
+    tool to retrieve the full content before drawing conclusions"
+  - triage_server.py is registered as a second MCP server
+  - LangGraph now has 3 tools: get_employee_manager,
+    read_triage_chunk, list_triage_references
+  ↓
+ReAct loop:
+  Turn 1: Gemini reads inline portion + TRIAGE_REF marker
+          → calls read_triage_chunk(reference_id="xxx", chunk_index=0)
+  Turn 2: LangGraph executes tool → triage_server pulls chunk from Redis
+          → returns 4000-char slice to Gemini
+  Turn 3: Gemini finds author → calls get_employee_manager(email=...)
+  Turn N: Gemini has full picture → writes incident report
+```
+
+---
+
+### Complete flow — current state
 
 ```mermaid
 sequenceDiagram
     participant Shell as Django shell
     participant Celery as Celery workers
     participant Chord as Chord callback
+    participant Chunk as chunking.py
+    participant Redis as Redis
     participant LG as LangGraph ReAct
-    participant MCP as hr_server stdio
+    participant HR as hr_server (SSE :8080)
+    participant Triage as triage_server (SSE :8090)
     participant DB as PostgreSQL
     participant Gemini as Gemini 2.5 Flash
 
@@ -58,21 +153,33 @@ sequenceDiagram
         Celery->>Celery: fetch_github_commits
         Celery->>Celery: fetch_slack_alerts
     end
-    Celery->>Chord: aggregated_logs list
-    Chord->>LG: run_mcp_enhanced_triage
-    LG->>MCP: ListToolsRequest
-    MCP-->>LG: get_employee_manager schema
-    LG->>Gemini: prompt + logs + tool schemas
-    Gemini-->>LG: CallToolRequest
-    LG->>MCP: get_employee_manager email
-    MCP->>DB: ORM lookup sync_to_async
-    DB-->>MCP: user / manager / not found
-    MCP-->>LG: tool result
-    LG->>Gemini: full history + tool result
-    Note over Gemini: 503 UNAVAILABLE × 2<br/>langchain-google-genai auto-retry
+    Celery->>Chord: aggregated_logs [Datadog, GitHub, Slack]
+    Chord->>Chunk: build_chunked_log_context(logs, run_id)
+    Note over Chunk: Small payloads → full JSON inline<br/>Large payloads → first N chars inline<br/>rest stored in Redis with ref id
+    Chunk->>Redis: cache.set("triage:ref:<id>", full_text)
+    Chunk-->>Chord: chunked_logs string + TRIAGE_REF markers
+    Chord->>LG: prompt (inline logs + markers + instructions)
+    LG->>HR: ListToolsRequest
+    HR-->>LG: get_employee_manager schema
+    LG->>Triage: ListToolsRequest
+    Triage-->>LG: read_triage_chunk + list_triage_references schemas
+    LG->>Gemini: prompt + 3 tool schemas
+    Note over Gemini: Sees TRIAGE_REF marker<br/>Reads tool docstring instruction<br/>Decides to fetch full log
+    Gemini-->>LG: CallTool read_triage_chunk(ref_id, chunk_index=0)
+    LG->>Triage: execute read_triage_chunk
+    Triage->>Redis: cache.get("triage:ref:<id>") → slice chars 0–4000
+    Redis-->>Triage: chunk text
+    Triage-->>LG: chunk 0 content
+    LG->>Gemini: history + chunk result
+    Gemini-->>LG: CallTool get_employee_manager(email="katrina@...")
+    LG->>HR: execute get_employee_manager
+    HR->>DB: ORM lookup sync_to_async
+    DB-->>HR: manager name
+    HR-->>LG: tool result
+    LG->>Gemini: full history + manager result
     Gemini-->>LG: final incident report
-    LG->>LG: extract_message_text
-    LG-->>Celery: plain string report
+    LG->>LG: extract_message_text (normalise Gemini block list)
+    LG-->>Celery: {run_id, report}
 ```
 
 ### Timeline breakdown
@@ -82,21 +189,24 @@ sequenceDiagram
 | **Scatter** | `04:58:46.487` | ~1.0s | `fetch_github_commits` finished |
 | **Scatter** | `04:58:46.503` | ~1.0s | `fetch_slack_alerts` finished (parallel with Datadog + GitHub) |
 | **Gather** | `04:58:46.503` | instant | `run_mcp_enhanced_triage` received — chord bundled 3 JSON blobs into one list |
-| **ReAct Turn 1** | `04:58:46.503+` | ~3s | Agent spawned `hr_server.py --transport stdio`; `ListToolsRequest` → tool schemas |
-| **Gemini call 1** | `04:58:49.416` | ~3s | Gemini read logs, chose `get_employee_manager` instead of plain text |
-| **MCP tool** | `04:58:49.416+` | &lt;1s | `CallToolRequest` → live Postgres query via `sync_to_async` |
+| **Chunking** | `04:58:46.503+` | &lt;1ms | Large payloads stored in Redis; inline text + TRIAGE_REF markers built |
+| **ReAct Turn 1** | `04:58:46.503+` | ~3s | Agent connected to both MCP daemons via SSE; `ListToolsRequest` → 3 tool schemas |
+| **Gemini call 1** | `04:58:49.416` | ~3s | Gemini read inline logs + markers, called `read_triage_chunk` |
+| **MCP chunk** | `04:58:49.416+` | &lt;1ms | `triage_server` pulled chunk from Redis → returned to Gemini |
+| **MCP HR** | `04:58:49.416+` | &lt;1s | `get_employee_manager` → live Postgres query via `sync_to_async` |
 | **503 drama** | `04:58:53.717` | +1.8s backoff | Gemini 503 — library retried automatically |
 | **503 drama** | `04:58:59.963` | +2.1s backoff | Second 503 — retried again |
-| **ReAct Turn 2** | `04:59:08.667` | ~8s | Gemini 200 OK — final report streamed |
+| **ReAct Turn N** | `04:59:08.667` | ~8s | Gemini 200 OK — final report streamed |
 | **Done** | `04:59:08.675` | **22.17s total** | Task succeeded; plain-text report returned |
 
 ```mermaid
 flowchart LR
-    A["0–1s<br/>Scatter<br/>3 parallel fetchers"] --> B["~1s<br/>Gather<br/>chord callback"]
-    B --> C["1–4s<br/>ReAct Turn 1<br/>ListTools + Gemini"]
-    C --> D["4–5s<br/>MCP CallTool<br/>Postgres lookup"]
-    D --> E["7–17s<br/>503 retries<br/>auto backoff"]
-    E --> F["17–22s<br/>ReAct Turn 2<br/>final report"]
+    A["0–1s<br/>Scatter<br/>3 parallel fetchers"] --> B["~1s<br/>Gather + Chunk<br/>inline split + Redis store"]
+    B --> C["1–4s<br/>ReAct Turn 1<br/>ListTools (3) + Gemini"]
+    C --> D1["read_triage_chunk<br/>Redis slice → Gemini"]
+    D1 --> D2["get_employee_manager<br/>Postgres lookup"]
+    D2 --> E["7–17s<br/>503 retries<br/>auto backoff"]
+    E --> F["17–22s<br/>ReAct Turn N<br/>final report"]
 ```
 
 ---

@@ -23,7 +23,7 @@ class ChunkedPayload:
     truncated: bool
 
 
-def _max_inline_chars() -> int:    
+def _max_inline_chars() -> int:
     return int(getattr(settings, "TRIAGE_MAX_INLINE_CHARS", 8000))
 
 
