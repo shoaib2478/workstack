@@ -86,6 +86,9 @@ jobs:
       - name: Run unit + integration tests (skip LLM/MCP)
         run: |
           python manage.py test \
+            apps.users.tests.test_auth_api \
+            apps.organizations.tests.test_onboarding_invite_api \
+            apps.rbac.tests.test_rbac_api \
             apps.incidents.tests.test_chunking \
             apps.incidents.tests.test_triage_flow \
             --verbosity 2

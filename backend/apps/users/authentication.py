@@ -12,7 +12,7 @@ class CustomCookieJWTAuthentication(JWTAuthentication):
 
         # If the header exists, someone is using Postman/cURL with a Bearer token. Let it pass.
         if header is not None:
-            raw_token = self.get_raw_toekn()
+            raw_token = self.get_raw_token(header)
         else:
             # Otherwise, extract the token from the HttpOnly cookie (The React Flow)
             raw_token = request.COOKIES.get(settings.SIMPLE_JWT['AUTH_COOKIE'])
